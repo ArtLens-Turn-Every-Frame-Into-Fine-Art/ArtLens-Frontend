@@ -1,50 +1,80 @@
-# Welcome to your Expo app 👋
+# ArtLens — Turn Every Frame Into Fine Art
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**ArtLens** is an AI-powered mobile application developed as a Final Year Project for the BSSE program at the University of Central Punjab. It leverages Deep Learning to transform real-time camera feeds and gallery images into high-quality fine art using Neural Style Transfer (NST) and Generative AI.
 
-## Get started
+## 🚀 Overview
 
-1. Install dependencies
+The project focuses on the intersection of Computer Vision and Mobile Computing. Unlike standard filter apps, ArtLens performs real-time semantic segmentation to separate subjects from backgrounds, allowing users to apply artistic styles to the foreground while using Stable Diffusion to generate custom backgrounds via text prompts.
 
-   ```bash
-   npm install
-   ```
+### Key Features
 
-2. Start the app
+-   **Real-time Style Transfer:** Apply famous artistic styles (e.g., Van Gogh, Picasso) to your live camera feed at 20-30 FPS.
+-   **Prompt-Based Backgrounds:** Integration with Stable Diffusion API to generate unique environments from text descriptions.
+-   **AI Segmentation:** Intelligent foreground/background separation using MediaPipe/DeepLabV3.
+-   **High-Performance UI:** Built with React Native (Expo) and Shopify FlashList for smooth asset browsing.
+-   **MERN Stack Backend:** Robust Node.js/Express backend for handling generative AI requests and user data.
 
-   ```bash
-   npx expo start
-   ```
+---
 
-In the output, you'll find options to open the app in a
+## 🛠️ Tech Stack
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+**Frontend:**
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+-   **Framework:** React Native (Expo)
+-   **Navigation:** Expo Router (File-based)
+-   **Image Processing:** Expo Image
 
-## Get a fresh project
+---
 
-When you're ready, run:
+## 📂 Project Structure
 
-```bash
-npm run reset-project
+```text
+├── app/               # Expo Router screens (Camera, Edit, Gallery)
+├── assets/            # ML Models, Fonts, and Images
+├── components/        # Reusable UI components (Modals, Buttons)
+├── hooks/             # Custom React hooks for ML logic
+├── services/          # API services for Backend/Stable Diffusion
+└── utils/             # Helper functions and Constants
+
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+---
 
-## Learn more
+## ⚙️ Getting Started
 
-To learn more about developing your project with Expo, look at the following resources:
+### Prerequisites
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+-   Node.js (v18+)
+-   Expo Go app on your mobile device
+-   NPM or Yarn
 
-## Join the community
+### Installation
 
-Join our community of developers creating universal apps.
+1. **Clone the repository:**
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```bash
+git clone https://github.com/ArtLens/ArtLens-Frontend.git
+cd ArtLens-Frontend
+
+```
+
+2. **Install Frontend Dependencies:**
+
+```bash
+npm ci
+
+```
+
+3. **Start the App:**
+
+```bash
+npx expo start
+
+```
+
+**OR**
+
+```bash
+npm run android release
+
+```
