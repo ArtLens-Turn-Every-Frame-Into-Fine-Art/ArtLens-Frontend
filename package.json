@@ -1,7 +1,7 @@
 {
 	"name": "artlens",
 	"main": "expo-router/entry",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"scripts": {
 		"start": "expo start",
 		"android": "expo run:android",
@@ -25,7 +25,6 @@
 		"expo": "55",
 		"expo-blur": "~55.0.8",
 		"expo-build-properties": "~55.0.9",
-		"expo-camera": "~55.0.9",
 		"expo-constants": "~55.0.7",
 		"expo-file-system": "~55.0.9",
 		"expo-font": "~55.0.4",
@@ -49,6 +48,7 @@
 		"react-native-safe-area-context": "~5.6.0",
 		"react-native-screens": "~4.23.0",
 		"react-native-svg": "15.15.3",
+		"react-native-vision-camera": "^4.7.3",
 		"react-native-web": "~0.21.0",
 		"react-native-worklets": "0.7.2"
 	},

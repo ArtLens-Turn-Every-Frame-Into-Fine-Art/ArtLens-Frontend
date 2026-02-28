@@ -2,8 +2,8 @@
 	"expo": {
 		"name": "ArtLens",
 		"slug": "artlens",
-		"version": "1.0.0",
-		"runtimeVersion": "1.0.0",
+		"version": "1.1.0",
+		"runtimeVersion": "1.1.0",
 		"description": "An AI-powered mobile application designed to transform ordinary photos into stunning works of art using real-time style transfer and generative AI background editing",
 		"platforms": ["ios", "android"],
 		"jsEngine": "hermes",
@@ -65,10 +65,9 @@
 				}
 			],
 			[
-				"expo-camera",
+				"react-native-vision-camera",
 				{
-					"cameraPermission": "Allow ArtLens to access your camera",
-					"microphonePermission": "Allow ArtLens to access your microphone",
+					"cameraPermissionText": "$(PRODUCT_NAME) needs access to your Camera.",
 					"recordAudioAndroid": false
 				}
 			],
