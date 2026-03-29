@@ -10,7 +10,6 @@ import {
 	Dimensions,
 	Image,
 	Platform,
-	SafeAreaView,
 	ScrollView,
 	StyleSheet,
 	Text,
@@ -18,6 +17,7 @@ import {
 	TouchableOpacity,
 	View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 const { width } = Dimensions.get("window");
 const COLUMN_WIDTH = (width - 50) / 2;

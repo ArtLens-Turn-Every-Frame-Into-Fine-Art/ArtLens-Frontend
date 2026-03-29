@@ -1,4 +1,3 @@
-import * as NavigationBar from "expo-navigation-bar";
 import { Stack, router, usePathname } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import {
@@ -19,10 +18,7 @@ function AppLayout() {
 	const insets = useSafeAreaInsets();
 	const pathname = usePathname();
 
-	useEffect(() => {
-		NavigationBar.setBackgroundColorAsync(COLORS.white);
-		NavigationBar.setButtonStyleAsync("dark");
-	}, []);
+	useEffect(() => {}, []);
 
 	// Hide global nav on the Camera screen for full immersion
 	const isCamera = pathname.includes("CameraScreen");

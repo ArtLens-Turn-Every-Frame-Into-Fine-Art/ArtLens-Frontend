@@ -7,7 +7,7 @@ import {
 	Instagram,
 	MoreHorizontal,
 	Share2,
-	Twitter,
+	X,
 } from "lucide-react-native";
 import React, { useState } from "react";
 import {
@@ -39,7 +39,7 @@ export default function ExportScreen() {
 	const shareOptions = [
 		{ name: "Instagram", icon: <Instagram color="#E1306C" size={24} /> },
 		{ name: "Facebook", icon: <Facebook color="#1877F2" size={24} /> },
-		{ name: "Twitter", icon: <Twitter color="#1DA1F2" size={24} /> },
+		{ name: "X", icon: <X color="#1DA1F2" size={24} /> },
 		{ name: "More", icon: <MoreHorizontal color="#8E8E93" size={24} /> },
 	];
 

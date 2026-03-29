@@ -8,7 +8,7 @@ import {
 	Mail,
 	MessageSquare,
 	Star,
-	Twitter,
+	X,
 } from "lucide-react-native";
 import React, { useState } from "react";
 import {
@@ -161,13 +161,13 @@ export default function AboutContact() {
 							}
 						/>
 						<ContactMethod
-							title="Twitter"
-							sub={APP_INFO.twitterHandle}
-							icon={<Twitter color={COLORS.white} size={20} />}
+							title="X"
+							sub={APP_INFO.xHandle}
+							icon={<X color={COLORS.white} size={20} />}
 							color="#1DA1F2"
 							onPress={() =>
 								openLink(
-									`https://twitter.com/${APP_INFO.twitterHandle.replace(
+									`https://x.com/${APP_INFO.xHandle.replace(
 										"@",
 										""
 									)}`

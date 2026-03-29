@@ -3,17 +3,21 @@
 		"name": "ArtLens",
 		"slug": "artlens",
 		"version": "1.1.0",
-		"runtimeVersion": "1.1.0",
+		"runtimeVersion": {
+			"policy": "fingerprint"
+		},
 		"description": "An AI-powered mobile application designed to transform ordinary photos into stunning works of art using real-time style transfer and generative AI background editing",
 		"platforms": ["ios", "android"],
-		"jsEngine": "hermes",
 		"orientation": "portrait",
 		"icon": "./assets/images/icon.png",
 		"scheme": "artlens",
 		"userInterfaceStyle": "automatic",
 		"ios": {
 			"supportsTablet": true,
-			"bundleIdentifier": "com.anonymous.ArtLens"
+			"bundleIdentifier": "com.artlens-app.ArtLens",
+			"infoPlist": {
+				"NSCameraUsageDescription": "$(PRODUCT_NAME) needs access to your Camera."
+			}
 		},
 		"android": {
 			"adaptiveIcon": {
@@ -23,20 +27,27 @@
 				"monochromeImage": "./assets/images/android-icon-monochrome.png"
 			},
 			"predictiveBackGestureEnabled": true,
-			"package": "com.anonymous.ArtLens",
+			"package": "com.artlens_app.ArtLens",
 			"permissions": [
 				"android.permission.CAMERA",
+				"android.permission.RECORD_AUDIO",
 				"android.permission.INTERNET",
+				"android.permission.ACCESS_NETWORK_STATE",
 				"android.permission.WAKE_LOCK",
 				"android.permission.FOREGROUND_SERVICE",
+				"android.permission.FOREGROUND_SERVICE_MICROPHONE",
+				"android.permission.FOREGROUND_SERVICE_CAMERA",
 				"android.permission.CAMERA",
+				"android.permission.RECORD_AUDIO",
 				"android.permission.INTERNET",
+				"android.permission.ACCESS_NETWORK_STATE",
 				"android.permission.WAKE_LOCK",
-				"android.permission.FOREGROUND_SERVICE"
+				"android.permission.FOREGROUND_SERVICE",
+				"android.permission.FOREGROUND_SERVICE_MICROPHONE",
+				"android.permission.FOREGROUND_SERVICE_CAMERA"
 			]
 		},
 		"plugins": [
-			"./withAndroidSplits",
 			"expo-router",
 			[
 				"expo-splash-screen",
@@ -55,12 +66,14 @@
 				"expo-build-properties",
 				{
 					"android": {
+						"buildreactnativefromsource": true,
 						"minSdkVersion": 29,
 						"compileSdkVersion": 36,
 						"targetSdkVersion": 36,
 						"enableProguardInReleaseBuilds": true,
 						"enableShrinkResourcesInReleaseBuilds": true,
-						"enableMinifyInReleaseBuilds": true
+						"enableMinifyInReleaseBuilds": true,
+						"buildArchs": ["arm64-v8a"]
 					}
 				}
 			],
@@ -68,25 +81,26 @@
 				"react-native-vision-camera",
 				{
 					"cameraPermissionText": "$(PRODUCT_NAME) needs access to your Camera.",
-					"recordAudioAndroid": false
+					"recordAudioAndroid": true
 				}
 			],
 			"expo-image",
-			"expo-web-browser"
+			"expo-web-browser",
+			"expo-updates"
 		],
 		"experiments": {
 			"typedRoutes": true,
 			"reactCompiler": true
 		},
-		"owner": "hsk9wjns",
 		"extra": {
 			"router": {},
 			"eas": {
-				"projectId": "d835e178-755b-4019-bb03-3d02cdd0a56d"
+				"projectId": "433dbeee-4ca0-4942-89ca-96aa94eea86f"
 			}
 		},
+		"owner": "artlens-app",
 		"updates": {
-			"url": "https://u.expo.dev/d835e178-755b-4019-bb03-3d02cdd0a56d",
+			"url": "https://u.expo.dev/433dbeee-4ca0-4942-89ca-96aa94eea86f",
 			"enableBsdiffPatchSupport": true
 		}
 	}

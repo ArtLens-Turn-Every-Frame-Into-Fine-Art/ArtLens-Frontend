@@ -11,7 +11,6 @@ import {
 	TouchableOpacity,
 	View,
 } from "react-native";
-// Import the global colors from your layout
 import { COLORS } from "../utils/constants";
 
 interface FeatureItemProps {

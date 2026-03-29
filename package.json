@@ -4,25 +4,22 @@
 	"version": "1.1.0",
 	"scripts": {
 		"start": "expo start",
-		"android": "expo run:android",
 		"ios": "expo run:ios",
 		"lint": "expo lint",
+		"android": "npx expo run:android",
 		"android:optimized": "npx expo run:android --variant debugOptimized",
-		"install-debugOptimized-apk-x86": "adb install -r ./android/app/build/outputs/apk/debugOptimized/app-x86_64-debugOptimized.apk",
-		"install-debugOptimized-apk-arm64": "adb install -r ./android/app/build/outputs/apk/debugOptimized/app-arm64-v8a-debugOptimized.apk",
 		"android:release": "npx expo run:android --variant release",
-		"install-release-apk-x86": "adb install -r ./android/app/build/outputs/apk/release/app-x86_64-release.apk",
-		"install-release-apk-arm64": "adb install -r ./android/app/build/outputs/apk/release/app-arm64-v8a-release.apk",
 		"graphtree": "node generate_graph_tree.js"
 	},
 	"dependencies": {
+		"@expo/log-box": "55.0.8",
 		"@expo/vector-icons": "^15.0.3",
 		"@react-native-community/slider": "5.1.2",
 		"@react-navigation/bottom-tabs": "^7.4.0",
 		"@react-navigation/elements": "^2.6.3",
 		"@react-navigation/native": "^7.1.8",
 		"@react-navigation/native-stack": "^7.3.16",
-		"expo": "55",
+		"expo": "~55.0.9",
 		"expo-blur": "~55.0.8",
 		"expo-build-properties": "~55.0.9",
 		"expo-constants": "~55.0.7",
@@ -33,11 +30,11 @@
 		"expo-linking": "~55.0.7",
 		"expo-media-library": "~55.0.9",
 		"expo-navigation-bar": "~55.0.8",
-		"expo-router": "~55.0.2",
+		"expo-router": "~55.0.8",
 		"expo-splash-screen": "~55.0.9",
 		"expo-status-bar": "~55.0.4",
 		"expo-system-ui": "~55.0.9",
-		"expo-updates": "~55.0.11",
+		"expo-updates": "~55.0.16",
 		"expo-web-browser": "~55.0.9",
 		"lucide-react-native": "^0.562.0",
 		"react": "19.2.0",
@@ -60,6 +57,11 @@
 		"eslint-config-expo": "~55.0.0",
 		"madge": "^8.0.0",
 		"typescript": "~5.9.2"
+	},
+	"overrides": {
+		"react": "19.2.0",
+		"react-dom": "19.2.0",
+		"@expo/log-box": "55.0.8"
 	},
 	"private": true
 }

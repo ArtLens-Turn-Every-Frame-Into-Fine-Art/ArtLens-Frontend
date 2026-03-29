@@ -28,5 +28,5 @@ export const APP_INFO = {
 	version: "2.4.0",
 	build: "1024",
 	supportEmail: "support@artlens.app",
-	twitterHandle: "@ArtLensApp",
+	xHandle: "@ArtLensApp",
 };

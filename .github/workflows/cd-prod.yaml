@@ -9,109 +9,84 @@ permissions:
   contents: write # Required for creating GitHub Releases
 
 jobs:
-  check_version:
+  check_fingerprint:
     runs-on: ubuntu-latest
     outputs:
-      version_changed: ${{ steps.check.outputs.changed }}
+      fingerprint_changed: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      fingerprint_hash: ${{ steps.fingerprint.outputs.fingerprint-hash }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # Necessary to compare with the previous commit
 
-      - name: Check runtimeVersion change
-        id: check
+      - name: 🏗 Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: 🚀 Setup Expo & EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_PAT }}
+
+      - name: 🔍 Check Fingerprint
+        id: fingerprint
+        # This compares the current state against the last successful build fingerprint
         run: |
-          # The commit BEFORE the push started
-          BEFORE_SHA=${{ github.event.before }}
-
-          # Extract current and previous versions
-          CURRENT_VER=$(jq -r '.expo.runtimeVersion' app.json)
-          PREVIOUS_VER=$(git show $BEFORE_SHA:app.json | jq -r '.expo.runtimeVersion')
-
-          echo "Current: $CURRENT_VER, Previous: $PREVIOUS_VER"
-
-          if [ "$CURRENT_VER" != "$PREVIOUS_VER" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-          fi
+          npm ci
+          npx eas-cli fingerprint:compare --platform android --json > diff.json
+          echo "fingerprint-hash=$(npx eas-cli fingerprint:generate --platform android)" >> $GITHUB_OUTPUT
+          echo "fingerprint-diff=$(cat diff.json)" >> $GITHUB_OUTPUT
 
   production-ship:
-    needs: check_version
+    needs: check_fingerprint
     name: Update & Build Production
     runs-on: ubuntu-latest
     environment: production
 
     steps:
       - name: 🏗 Checkout repository
-        uses: actions/checkout@v4
-
-      - name: 📚 Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: "npm"
+        uses: actions/checkout@v6
 
       - name: 🚀 Setup Expo & EAS
         uses: expo/expo-github-action@v8
         with:
-          expo-version: latest
           eas-version: latest
           token: ${{ secrets.EXPO_PAT }}
 
-      - name: 📦 Install dependencies
-        run: npm ci
-
       # 1. SHIP OTA UPDATE (Instant update for existing users)
       - name: ☁️ Publish OTA Update
-        if: needs.check_version.outputs.version_changed == 'false'
         run: eas update --branch production --message "${{ github.event.head_commit.message }}"
 
-      # 2. BUILD ANDROID (Wait and Download)
-      - name: 🤖 Build Android (APK)
-        if: needs.check_version.outputs.version_changed == 'true'
-        id: android_build
-        run: |
-          # Run build and save metadata to JSON
-          eas build --platform android --profile production --non-interactive --json > android-build.json
-
-          # Extract the direct download link
-          APK_URL=$(jq -r '.[0].artifacts.applicationArchiveUrl' android-build.json)
-
-          # Download the file to the runner
-          curl -L "$APK_URL" -o ArtLens.apk
-
-      # 3. BUILD IOS (Wait and Download)
-      #- name: 🍎 Build iOS (IPA)
-      #  if: needs.check_version.outputs.version_changed == 'true'
-      #  id: ios_build
-      #  run: |
-      #    # Run build and save metadata to JSON
-      #    eas build --platform ios --profile production --non-interactive --json > ios-build.json
-
-      #    # Extract the direct download link
-      #    IPA_URL=$(jq -r '.[0].artifacts.applicationArchiveUrl' ios-build.json)
-
-      #    # Download the file to the runner
-      #    curl -L "$IPA_URL" -o ArtLens.ipa
-
-      # 4. CREATE GITHUB RELEASE
-      - name: 📝 Create GitHub Release
-        if: needs.check_version.outputs.version_changed == 'true'
-        uses: softprops/action-gh-release@v1
+      # 2. CREATE THE RELEASE CONTAINER (Draft mode)
+      - name: 📝 Create Release Container
+        if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+        id: create_release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: ArtLens Release v${{ github.run_number }}
           body: |
-            ## Latest Changes
+            ## Recent Changes
             ${{ github.event.head_commit.message }}
 
-            **Build Number:** ${{ github.run_number }}
-          draft: false
-          prerelease: false
+            **Fingerprint:** ${{ needs.check_fingerprint.outputs.fingerprint_hash }}
+          draft: true # Keep as draft until builds are attached
           generate_release_notes: true
-          files: |
-            ArtLens.apk
-            #ArtLens.ipa
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. TRIGGER ASYNC BUILDS
+      - name: 🤖 Trigger Android Build
+        if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+        run: |
+          npx eas-cli build --platform android --profile production --non-interactive --no-wait \
+          --metadata '{"githubTagName":"v${{ github.run_number }}"}'
+
+      #- name: 🍎 Trigger iOS Build (Commented)
+      #  if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+      #  run: |
+      #    npx eas-cli build --platform ios --profile production --non-interactive --no-wait \
+      #    --metadata '{"githubTagName":"v${{ github.run_number }}"}'
