@@ -8,11 +8,11 @@ The project focuses on the intersection of Computer Vision and Mobile Computing.
 
 ### Key Features
 
--   **Real-time Style Transfer:** Apply famous artistic styles (e.g., Van Gogh, Picasso) to your live camera feed at 20-30 FPS.
--   **Prompt-Based Backgrounds:** Integration with Stable Diffusion API to generate unique environments from text descriptions.
--   **AI Segmentation:** Intelligent foreground/background separation using MediaPipe/DeepLabV3.
--   **High-Performance UI:** Built with React Native (Expo) and Shopify FlashList for smooth asset browsing.
--   **MERN Stack Backend:** Robust Node.js/Express backend for handling generative AI requests and user data.
+- **Real-time Style Transfer:** Apply famous artistic styles (e.g., Van Gogh, Picasso) to your live camera feed at 20-30 FPS.
+- **Prompt-Based Backgrounds:** Integration with Stable Diffusion API to generate unique environments from text descriptions.
+- **AI Segmentation:** Intelligent foreground/background separation using MediaPipe/DeepLabV3.
+- **High-Performance UI:** Built with React Native (Expo) and Shopify FlashList for smooth asset browsing.
+- **MERN Stack Backend:** Robust Node.js/Express backend for handling generative AI requests and user data.
 
 ---
 
@@ -20,9 +20,9 @@ The project focuses on the intersection of Computer Vision and Mobile Computing.
 
 **Frontend:**
 
--   **Framework:** React Native (Expo)
--   **Navigation:** Expo Router (File-based)
--   **Image Processing:** Expo Image
+- **Framework:** React Native (Expo)
+- **Navigation:** Expo Router (File-based)
+- **Image Processing:** React Native Vision Camera
 
 ---
 
@@ -44,9 +44,9 @@ The project focuses on the intersection of Computer Vision and Mobile Computing.
 
 ### Prerequisites
 
--   Node.js (v18+)
--   Expo Go app on your mobile device
--   NPM or Yarn
+- Node.js (v22+)
+- Mobile device
+- NPM or Yarn
 
 ### Installation
 
@@ -68,13 +68,6 @@ npm ci
 3. **Start the App:**
 
 ```bash
-npx expo start
-
-```
-
-**OR**
-
-```bash
-npm run android release
+npm run android:release
 
 ```
