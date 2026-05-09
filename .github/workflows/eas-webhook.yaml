@@ -1,0 +1,37 @@
+name: EAS Build Complete Receiver
+
+on:
+  repository_dispatch:
+    types: [eas-build]
+
+jobs:
+  upload-artifact:
+    runs-on: ubuntu-latest
+    if: github.event.client_payload.status == 'finished'
+    steps:
+      - name: 📥 Download Artifact
+        run: |
+          # Detect platform from the Expo webhook payload
+          PLATFORM="${{ github.event.client_payload.platform }}"
+
+          if [ "$PLATFORM" == "android" ]; then
+            FILENAME="ArtLens_arm64-v8a.apk"
+          else
+            FILENAME="ArtLens.ipa"
+          fi
+
+          # Download the file using the direct URL from Expo
+          curl -L "${{ github.event.client_payload.artifacts.applicationArchiveUrl }}" -o "$FILENAME"
+
+          # Export the filename so the next step can use it
+          echo "FINAL_FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: 📤 Attach to Existing Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.client_payload.metadata.githubTagName }}
+          files: ${{ env.FINAL_FILENAME }}
+          append_body: true
+          draft: false # Publish the release once the first artifact hits
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

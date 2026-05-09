@@ -1,0 +1,92 @@
+name: Frontend Production CD
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write # Required for creating GitHub Releases
+
+jobs:
+  check_fingerprint:
+    runs-on: ubuntu-latest
+    outputs:
+      fingerprint_changed: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      fingerprint_hash: ${{ steps.fingerprint.outputs.fingerprint-hash }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Necessary to compare with the previous commit
+
+      - name: 🏗 Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: 🚀 Setup Expo & EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_PAT }}
+
+      - name: 🔍 Check Fingerprint
+        id: fingerprint
+        # This compares the current state against the last successful build fingerprint
+        run: |
+          npm ci
+          npx eas-cli fingerprint:compare --platform android --json > diff.json
+          echo "fingerprint-hash=$(npx eas-cli fingerprint:generate --platform android)" >> $GITHUB_OUTPUT
+          echo "fingerprint-diff=$(cat diff.json)" >> $GITHUB_OUTPUT
+
+  production-ship:
+    needs: check_fingerprint
+    name: Update & Build Production
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: 🏗 Checkout repository
+        uses: actions/checkout@v6
+
+      - name: 🚀 Setup Expo & EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_PAT }}
+
+      # 1. SHIP OTA UPDATE (Instant update for existing users)
+      - name: ☁️ Publish OTA Update
+        run: eas update --branch production --message "${{ github.event.head_commit.message }}"
+
+      # 2. CREATE THE RELEASE CONTAINER (Draft mode)
+      - name: 📝 Create Release Container
+        if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: ArtLens Release v${{ github.run_number }}
+          body: |
+            ## Recent Changes
+            ${{ github.event.head_commit.message }}
+
+            **Fingerprint:** ${{ needs.check_fingerprint.outputs.fingerprint_hash }}
+          draft: true # Keep as draft until builds are attached
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. TRIGGER ASYNC BUILDS
+      - name: 🤖 Trigger Android Build
+        if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+        run: |
+          npx eas-cli build --platform android --profile production --non-interactive --no-wait \
+          --metadata '{"githubTagName":"v${{ github.run_number }}"}'
+
+      #- name: 🍎 Trigger iOS Build (Commented)
+      #  if: needs.check_fingerprint.outputs.fingerprint_changed == 'true'
+      #  run: |
+      #    npx eas-cli build --platform ios --profile production --non-interactive --no-wait \
+      #    --metadata '{"githubTagName":"v${{ github.run_number }}"}'
