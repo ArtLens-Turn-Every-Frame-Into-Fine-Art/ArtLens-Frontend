@@ -6,21 +6,19 @@ import {
 	Image as ImageIcon,
 	Settings,
 } from "lucide-react-native";
-import React, { useEffect } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import React from "react";
+import { StyleSheet, TouchableOpacity, View } from "react-native";
 import {
 	SafeAreaProvider,
 	useSafeAreaInsets,
 } from "react-native-safe-area-context";
-import { COLORS } from "../utils/constants";
+import { COLORS } from "@/utils/constants";
+import { ModelProvider } from "@/context/ModelContext";
 
 function AppLayout() {
 	const insets = useSafeAreaInsets();
 	const pathname = usePathname();
 
-	useEffect(() => {}, []);
-
-	// Hide global nav on the Camera screen for full immersion
 	const isCamera = pathname.includes("CameraScreen");
 
 	return (
@@ -38,29 +36,24 @@ function AppLayout() {
 				/>
 			</View>
 
-			{/* 2. GLOBAL BOTTOM NAVIGATION (Moved from individual screens) */}
 			{!isCamera && (
-				<View style={[styles.bottomNav, { paddingBottom: 40 }]}>
+				<View style={[styles.bottomNav, { paddingBottom: 60 }]}>
 					<NavItem
 						icon={<Home size={24} />}
-						label=""
 						active={pathname === "/"}
 						onPress={() => router.push("/")}
 					/>
 					<NavItem
 						icon={<ImageIcon size={24} />}
-						label=""
 						active={pathname.includes("Gallery")}
 						onPress={() => router.push("/GalleryScreen")}
 					/>
 					<NavItem
 						icon={<Camera size={24} />}
-						label=""
 						onPress={() => router.push("/CameraScreen")}
 					/>
 					<NavItem
 						icon={<Settings size={24} />}
-						label=""
 						active={pathname.includes("Settings")}
 						onPress={() => router.push("/SettingsScreen")}
 					/>
@@ -70,29 +63,23 @@ function AppLayout() {
 	);
 }
 
-const NavItem = ({ icon, label, active, onPress }: any) => (
+export default function RootLayout() {
+	return (
+		<ModelProvider>
+			<SafeAreaProvider>
+				<AppLayout />
+			</SafeAreaProvider>
+		</ModelProvider>
+	);
+}
+
+const NavItem = ({ icon, active, onPress }: any) => (
 	<TouchableOpacity style={styles.navItem} onPress={onPress}>
 		{React.cloneElement(icon, {
 			color: active ? COLORS.primary : COLORS.textGray,
 		})}
-		<Text
-			style={[
-				styles.navText,
-				{ color: active ? COLORS.primary : COLORS.textGray },
-			]}
-		>
-			{label}
-		</Text>
 	</TouchableOpacity>
 );
-
-export default function RootLayout() {
-	return (
-		<SafeAreaProvider>
-			<AppLayout />
-		</SafeAreaProvider>
-	);
-}
 
 const styles = StyleSheet.create({
 	container: { flex: 1 },
@@ -105,5 +92,4 @@ const styles = StyleSheet.create({
 		justifyContent: "space-around",
 	},
 	navItem: { alignItems: "center" },
-	navText: { fontSize: 10, marginTop: 4, fontWeight: "500" },
 });

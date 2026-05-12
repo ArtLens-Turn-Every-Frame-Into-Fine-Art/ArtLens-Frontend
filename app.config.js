@@ -1,0 +1,115 @@
+export default {
+	name: "ArtLens",
+	slug: "artlens",
+	version: "1.3.0",
+	runtimeVersion: {
+		policy: "fingerprint"
+	},
+	description: "An AI-powered mobile application designed to transform ordinary photos into stunning works of art using real-time style transfer and generative AI background editing",
+	platforms: ["ios", "android"],
+	orientation: "portrait",
+	icon: "./assets/images/icon.png",
+	scheme: "artlens",
+	userInterfaceStyle: "automatic",
+	ios: {
+		supportsTablet: true,
+		bundleIdentifier: "com.artlens.ArtLens",
+		infoPlist: {
+			NSCameraUsageDescription: "$(PRODUCT_NAME) needs access to your Camera."
+		}
+	},
+	android: {
+		package: "com.artlens.ArtLens",
+		adaptiveIcon: {
+			backgroundColor: "#E6F4FE",
+			foregroundImage: "./assets/images/android-icon-foreground.png",
+			backgroundImage: "./assets/images/android-icon-background.png",
+			monochromeImage: "./assets/images/android-icon-monochrome.png"
+		},
+		predictiveBackGestureEnabled: true,
+		permissions: [
+			"android.permission.CAMERA",
+			"android.permission.RECORD_AUDIO",
+			"android.permission.INTERNET",
+			"android.permission.ACCESS_NETWORK_STATE",
+			"android.permission.WAKE_LOCK",
+			"android.permission.FOREGROUND_SERVICE",
+			"android.permission.FOREGROUND_SERVICE_MICROPHONE",
+			"android.permission.FOREGROUND_SERVICE_CAMERA"
+		]
+	},
+	plugins: [
+		"expo-router",
+		[
+			"expo-splash-screen",
+			{
+				"image": "./assets/images/splash-icon.png",
+				"imageWidth": 200,
+				"resizeMode": "contain",
+				"backgroundColor": "#E6F4FE",
+				"dark": {
+					"backgroundColor": "#121212"
+				}
+			}
+		],
+		"expo-font",
+		[
+			"expo-build-properties",
+			{
+				"android": {
+					"buildreactnativefromsource": true,
+					"minSdkVersion": 29,
+					"maxSdkVersion": 36,
+					"compileSdkVersion": 36,
+					"targetSdkVersion": 36,
+					"enableProguardInReleaseBuilds": true,
+					"enableShrinkResourcesInReleaseBuilds": true,
+					"enableMinifyInReleaseBuilds": true,
+					"buildArchs": ["arm64-v8a", "x86_64"],
+					"extraGradleProperties": [
+						{
+							"name": "reanimated.ignoreVersionCheck",
+							"value": "true"
+						},
+						{
+							"name": "reanimated.enableNewArchitecture",
+							"value": "true"
+						}
+					]
+				}
+			}
+		],
+		[
+			"react-native-vision-camera",
+			{
+				"cameraPermissionText": "$(PRODUCT_NAME) needs access to your Camera.",
+				"recordAudioAndroid": true
+			}
+		],
+		[
+			"react-native-fast-tflite",
+			{
+				"enableAndroidGpuLibraries": true
+			}
+		],
+		"expo-image",
+		"expo-web-browser",
+		"expo-updates"
+	],
+	experiments: {
+		typedRoutes: true,
+		reactCompiler: true
+	},
+	owner: "artlens-app",
+	updates: {
+		url: "https://u.expo.dev/433dbeee-4ca0-4942-89ca-96aa94eea86f",
+		enableBsdiffPatchSupport: true
+	},
+	extra: {
+		apiBase: process.env.EXPO_PUBLIC_API_BASE, // From current app.config.js
+		router: {},
+		eas: {
+			projectId: "433dbeee-4ca0-4942-89ca-96aa94eea86f"
+		}
+	}
+};

@@ -1,424 +1,276 @@
-import { BlurView } from "expo-blur";
-import { router } from "expo-router";
+import React, { useCallback, useEffect, useRef } from "react";
 import {
-	Camera,
-	useCameraDevice,
-	useCameraPermission,
-} from "react-native-vision-camera";
-import { DownloadCloud, Layers, RotateCw, X, Zap } from "lucide-react-native";
-import React, { useState } from "react";
-import {
-	Image,
-	ScrollView,
+	Alert,
+	Platform,
 	StyleSheet,
 	Text,
 	TouchableOpacity,
 	View,
-	ActivityIndicator,
+	useWindowDimensions,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+	Camera,
+	useCameraDevice,
+	useFrameProcessor,
+} from "react-native-vision-camera";
+import { useSharedValue, useRunOnJS } from "react-native-worklets-core";
+import { useResizePlugin } from "vision-camera-resize-plugin";
+import {
+	Canvas,
+	Image as SkiaImage,
+	useCanvasRef,
+} from "@shopify/react-native-skia";
+import { useNavigation } from "@react-navigation/native";
+import { getActiveModel } from "../services/InferenceEngine";
+import { tensorToRGBA, makeSkiaImage } from "../utils/tensorUtils";
+import { useModelStore } from "../stores/useModelStore";
+import type { TensorflowModel } from "react-native-fast-tflite";
 
-import { COLORS } from "@/utils/constants";
-
-// Mocking the model data structure based on your UC-6 requirement
-const FILTERS = [
-	{
-		id: "1",
-		name: "Impression",
-		size: "18MB",
-		isDownloaded: true,
-		image: "https://picsum.photos/id/10/200",
-	},
-	{
-		id: "2",
-		name: "Cyberpunk",
-		size: "22MB",
-		isDownloaded: false,
-		image: "https://picsum.photos/id/1044/200",
-	},
-	{
-		id: "3",
-		name: "Oil Paint",
-		size: "19MB",
-		isDownloaded: false,
-		image: "https://picsum.photos/id/1025/200",
-	},
-];
+const MODEL_SIZE = 256;
+const INFERENCE_INTERVAL_MS = 66; // ~15 FPS live preview
 
 export default function CameraScreen() {
-	const insets = useSafeAreaInsets();
-	const { hasPermission, requestPermission } = useCameraPermission();
-	const [facing, setFacing] = useState<"front" | "back">("back");
-	const device = useCameraDevice(facing);
+	const navigation = useNavigation<any>();
+	const device = useCameraDevice("back");
+	const { resize } = useResizePlugin();
+	const canvasRef = useCanvasRef();
+	const { width, height } = useWindowDimensions();
 
-	// ML State Management
-	const [activeFilter, setActiveFilter] = useState("1");
-	const [isModelLoading, setIsModelLoading] = useState(false);
-	const [isDownloading, setIsDownloading] = useState(false);
+	const selectedModel = useModelStore((s) => s.selectedModel);
+	const isLoadingModel = useModelStore((s) => s.isLoadingModel);
 
-	// Handle Filter Selection & Model Loading (NFR-P2)
-	const handleFilterSelect = async (filter: (typeof FILTERS)[0]) => {
-		if (filter.id === activeFilter) return;
+	// ── Worklet-accessible model reference ────────────────────────────────────
+	//
+	// WHY NOT getActiveModel() directly in the worklet?
+	// ─────────────────────────────────────────────────
+	// `activeModel` in InferenceEngine lives in the MAIN JS thread's module
+	// scope. Frame processors run on a SEPARATE thread via react-native-
+	// worklets-core. The worklet thread cannot read main-thread module-level
+	// variables — they are in a different memory space. getActiveModel() will
+	// always return null inside a 'worklet'.
+	//
+	// useSharedValue creates a JSI-level shared reference that IS readable
+	// from both the main thread and any worklet thread simultaneously.
+	//
+	const modelSharedValue = useSharedValue<TensorflowModel | null>(null);
 
-		if (!filter.isDownloaded) {
-			// Trigger UC-6: Download Model
-			setIsDownloading(true);
-			// MOCK DOWNLOAD DELAY
-			setTimeout(() => {
-				setIsDownloading(false);
-				filter.isDownloaded = true; // Update local state
-				loadModelToRAM(filter.id);
-			}, 3000);
-			return;
+	// Sync the InferenceEngine singleton → shared value whenever loading
+	// finishes or the selected model changes.
+	useEffect(() => {
+		if (!isLoadingModel) {
+			modelSharedValue.value = getActiveModel();
 		}
-		loadModelToRAM(filter.id);
-	};
+	}, [isLoadingModel, selectedModel, modelSharedValue]);
 
-	const loadModelToRAM = (filterId: string) => {
-		setIsModelLoading(true);
-		setActiveFilter(filterId);
-		// MOCK RAM LOAD DELAY (1-3 seconds)
-		setTimeout(() => setIsModelLoading(false), 1500);
-	};
+	// ── SkImage ref with safe disposal ────────────────────────────────────────
+	//
+	// WHY USE dispose()?
+	// ──────────────────
+	// SkImage objects hold GPU texture memory allocated on the native side.
+	// Simply overwriting the ref leaves the old texture alive with no JS
+	// reference pointing to it — it can never be GC'd. At 15 fps this
+	// creates ~15 leaked GPU textures per second → OOM crash in ~60s.
+	//
+	const skiaImageRef = useRef<ReturnType<typeof makeSkiaImage> | null>(null);
+	const lastInferenceMs = useSharedValue(0);
 
-	if (!hasPermission) {
+	// ── Render stylized frame on JS thread (called from worklet via runOnJS) ──
+	const renderFrameJS = useRunOnJS(
+		(rgba: Uint8ClampedArray) => {
+			// Dispose old image BEFORE creating new one to free GPU memory.
+			const prev = skiaImageRef.current;
+			skiaImageRef.current = makeSkiaImage(rgba);
+			prev?.dispose(); // safe: no-op if prev is null
+			canvasRef.current?.redraw();
+		},
+		[canvasRef],
+	);
+
+	// ── Frame Processor (C++ JSI worklet — NOT on JS thread) ─────────────────
+	const frameProcessor = useFrameProcessor(
+		(frame) => {
+			"worklet";
+
+			// 1. Throttle to ~15 FPS to prevent thermal throttling
+			const now = Date.now();
+			if (now - lastInferenceMs.value < INFERENCE_INTERVAL_MS) return;
+			lastInferenceMs.value = now;
+			// NOTE: do NOT set lastInferenceMs again after inference —
+			// that would compound the delay and reduce effective FPS.
+
+			// 2. Get model from the worklet-accessible shared value.
+			//    This is the ONLY safe way to read InferenceEngine state
+			//    from a worklet. getActiveModel() would return null here.
+			const model = modelSharedValue.value;
+			if (!model) return;
+
+			// 3. Resize frame to [256, 256] float32.
+			//    vision-camera-resize-plugin returns a Float32Array wrapping
+			//    a native-allocated buffer. Values are in [0.0, 255.0].
+			const resized = resize(frame, {
+				scale: { width: MODEL_SIZE, height: MODEL_SIZE },
+				pixelFormat: "rgb",
+				dataType: "float32",
+				rotation: "0deg",
+			});
+
+			// Normalize [0,255] → [0.0,1.0] into a NEW Float32Array.
+			// NEVER mutate `resized` in-place — it wraps a native buffer
+			// and mutation causes undefined behaviour / frame corruption.
+			const input = new Float32Array(resized.length);
+			for (let i = 0; i < resized.length; i++) {
+				input[i] = resized[i] / 255.0;
+			}
+
+			// 4. Run TFLite synchronously on GPU/NPU delegate.
+			//    runSync takes ArrayBuffer[], returns ArrayBuffer[].
+			//    Float32Array.buffer → ArrayBuffer (explicit cast, not `as any`).
+			const [outputBuffer] = model.runSync([
+				input.buffer as ArrayBuffer,
+			]) as ArrayBuffer[];
+
+			// 5. Wrap output buffer and convert to RGBA for Skia.
+			const outputFloat32 = new Float32Array(outputBuffer);
+			const rgba = tensorToRGBA(outputFloat32);
+
+			// 6. Hand off to JS thread for Skia rendering.
+			renderFrameJS(rgba);
+		},
+		[
+			modelSharedValue,
+			resize,
+			renderFrameJS,
+			lastInferenceMs,
+			tensorToRGBA,
+		],
+	);
+
+	// ── Capture Handler ────────────────────────────────────────────────────────
+	// cameraRef declared before handleCapture so the closure is readable top-to-bottom.
+	const cameraRef = useRef<Camera>(null);
+
+	const handleCapture = useCallback(async () => {
+		if (!cameraRef.current || !selectedModel) return;
+
+		try {
+			const photo = await cameraRef.current.takePhoto({ flash: "off" });
+
+			// Normalize path: iOS returns a bare path without 'file://',
+			// RNFS and Skia both need the scheme to locate the file reliably.
+			const photoPath =
+				Platform.OS === "ios" && !photo.path.startsWith("file://")
+					? `file://${photo.path}`
+					: photo.path;
+
+			navigation.navigate("Refine", {
+				photoPath,
+				modelId: selectedModel.id,
+				modelVersion: selectedModel.version,
+			});
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : "Unknown error";
+			Alert.alert("Capture Failed", msg);
+		}
+	}, [selectedModel, navigation]);
+
+	// ── Early returns ──────────────────────────────────────────────────────────
+	if (!device) {
 		return (
-			<View style={styles.center}>
-				<Zap
-					size={48}
-					color={COLORS.primary}
-					style={{ marginBottom: 20 }}
-				/>
-				<Text style={styles.whiteText}>
-					Camera access is required for real-time AI art.
-				</Text>
-				<TouchableOpacity
-					style={styles.permissionBtn}
-					onPress={requestPermission}
-				>
-					<Text style={styles.permissionBtnText}>Enable Camera</Text>
-				</TouchableOpacity>
+			<View style={styles.container}>
+				<Text style={styles.hint}>No camera found</Text>
 			</View>
 		);
 	}
 
-	if (device == null) return <View style={styles.blackBg} />;
+	if (!selectedModel) {
+		return (
+			<View style={styles.container}>
+				<Text style={styles.hint}>
+					Select a style from the Gallery first
+				</Text>
+			</View>
+		);
+	}
 
 	return (
 		<View style={styles.container}>
+			{/* Live camera feed — hidden behind Skia canvas */}
 			<Camera
-				style={styles.absoluteFill}
+				ref={cameraRef}
+				style={StyleSheet.absoluteFill}
 				device={device}
 				isActive={true}
-				// frameProcessor={myStyleTransferFrameProcessor} // <-- You will plug your ML model here later
+				frameProcessor={frameProcessor}
+				fps={30}
+				pixelFormat="yuv"
+				photo={true}
 			/>
 
-			{/* Loading Overlays */}
-			{(isModelLoading || isDownloading) && (
+			{/* Skia canvas — renders stylized output on top of camera */}
+			<Canvas ref={canvasRef} style={StyleSheet.absoluteFill}>
+				{skiaImageRef.current && (
+					<SkiaImage
+						image={skiaImageRef.current}
+						x={0}
+						y={0}
+						width={width}
+						height={height}
+						fit="cover"
+					/>
+				)}
+			</Canvas>
+
+			{/* Loading overlay — shown while model is being loaded to memory */}
+			{isLoadingModel && (
 				<View style={styles.loadingOverlay}>
-					<BlurView
-						intensity={50}
-						tint="dark"
-						style={styles.loadingBlur}
-					>
-						<ActivityIndicator
-							size="large"
-							color={COLORS.primary}
-						/>
-						<Text style={styles.loadingText}>
-							{isDownloading
-								? "Downloading Model (approx 20MB)..."
-								: "Loading Model to RAM..."}
-						</Text>
-					</BlurView>
+					<Text style={styles.loadingText}>Loading style…</Text>
 				</View>
 			)}
 
-			{/* Top Controls Overlay */}
-			<View style={[styles.topOverlay, { paddingTop: insets.top || 20 }]}>
+			{/* Capture button */}
+			<View style={styles.controls}>
 				<TouchableOpacity
-					style={styles.glassBtn}
-					onPress={() => router.back()}
-				>
-					<X color={COLORS.white} size={22} />
-				</TouchableOpacity>
-
-				<BlurView intensity={30} tint="dark" style={styles.modeBadge}>
-					<View style={styles.activeDot} />
-					<Text style={styles.modeText}>AI LIVE PREVIEW</Text>
-				</BlurView>
-
-				<TouchableOpacity
-					style={styles.glassBtn}
-					onPress={() =>
-						setFacing(facing === "back" ? "front" : "back")
-					}
-				>
-					<RotateCw color={COLORS.white} size={22} />
-				</TouchableOpacity>
-			</View>
-
-			{/* Bottom UI Area */}
-			<View
-				style={[
-					styles.bottomArea,
-					{ paddingBottom: insets.bottom || 40 },
-				]}
-			>
-				{/* Filter Selector */}
-				<ScrollView
-					horizontal
-					showsHorizontalScrollIndicator={false}
-					contentContainerStyle={styles.filterScroll}
-				>
-					{FILTERS.map((f) => (
-						<TouchableOpacity
-							key={f.id}
-							onPress={() => handleFilterSelect(f)}
-							style={styles.filterItem}
-						>
-							<View
-								style={[
-									styles.filterRing,
-									activeFilter === f.id && {
-										borderColor: COLORS.primary,
-									},
-								]}
-							>
-								<Image
-									source={{ uri: f.image }}
-									style={styles.filterImg}
-								/>
-								{/* Download Icon Overlay for un-downloaded models */}
-								{!f.isDownloaded && (
-									<View style={styles.downloadBadge}>
-										<DownloadCloud
-											size={16}
-											color={COLORS.white}
-										/>
-									</View>
-								)}
-							</View>
-							<Text
-								style={[
-									styles.filterLabel,
-									activeFilter === f.id && {
-										color: COLORS.primary,
-									},
-								]}
-							>
-								{f.name}
-							</Text>
-						</TouchableOpacity>
-					))}
-				</ScrollView>
-
-				{/* Main Actions */}
-				<View style={styles.actionRow}>
-					<TouchableOpacity
-						style={styles.sideAction}
-						onPress={() => router.push("/BackgroundGenerator")}
-					>
-						<BlurView
-							intensity={20}
-							tint="light"
-							style={styles.sideIconBox}
-						>
-							<Layers color={COLORS.white} size={24} />
-						</BlurView>
-						<Text style={styles.sideText}>BG Gen</Text>
-					</TouchableOpacity>
-
-					{/* Shutter Button */}
-					<TouchableOpacity
-						style={styles.shutterOuter}
-						activeOpacity={0.8}
-						onPress={() => router.push("/EditCanvas")}
-					>
-						<View style={styles.shutterInner} />
-					</TouchableOpacity>
-
-					<TouchableOpacity
-						style={styles.sideAction}
-						onPress={() => router.push("/GalleryScreen")}
-					>
-						<Image
-							source={{ uri: "https://picsum.photos/id/64/100" }}
-							style={styles.galleryPreview}
-						/>
-						<Text style={styles.sideText}>Gallery</Text>
-					</TouchableOpacity>
-				</View>
+					style={[
+						styles.captureBtn,
+						isLoadingModel && styles.captureBtnDisabled,
+					]}
+					onPress={handleCapture}
+					disabled={isLoadingModel}
+				/>
 			</View>
 		</View>
 	);
 }
 
 const styles = StyleSheet.create({
-	// ... (Keep your existing styles) ...
-	container: { flex: 1, backgroundColor: COLORS.black },
-	absoluteFill: {
+	container: { flex: 1, backgroundColor: "#000" },
+	hint: { color: "#fff", textAlign: "center", marginTop: 60, fontSize: 16 },
+	controls: {
 		position: "absolute",
-		top: 0,
-		left: 0,
-		right: 0,
-		bottom: 0,
-	},
-	blackBg: { flex: 1, backgroundColor: COLORS.black },
-	center: {
-		flex: 1,
-		justifyContent: "center",
+		bottom: 48,
+		width: "100%",
 		alignItems: "center",
-		backgroundColor: COLORS.black,
-		padding: 40,
 	},
-	whiteText: {
-		color: COLORS.white,
-		fontSize: 16,
-		textAlign: "center",
-		marginBottom: 30,
-		opacity: 0.8,
+	captureBtn: {
+		width: 72,
+		height: 72,
+		borderRadius: 36,
+		backgroundColor: "#fff",
+		borderWidth: 4,
+		borderColor: "rgba(255,255,255,0.4)",
 	},
-	permissionBtn: {
-		backgroundColor: COLORS.primary,
-		paddingHorizontal: 32,
-		paddingVertical: 16,
-		borderRadius: 30,
+	captureBtnDisabled: {
+		backgroundColor: "rgba(255,255,255,0.3)",
 	},
-	permissionBtnText: { color: COLORS.white, fontWeight: "800", fontSize: 16 },
-	// Overlays
 	loadingOverlay: {
 		...StyleSheet.absoluteFillObject,
+		backgroundColor: "rgba(0,0,0,0.5)",
 		justifyContent: "center",
 		alignItems: "center",
-		zIndex: 10,
 	},
-	loadingBlur: {
-		padding: 30,
-		borderRadius: 20,
-		alignItems: "center",
-		overflow: "hidden",
-	},
-	loadingText: { color: COLORS.white, marginTop: 15, fontWeight: "600" },
-	topOverlay: {
-		position: "absolute",
-		top: 0,
-		left: 0,
-		right: 0,
-		flexDirection: "row",
-		justifyContent: "space-between",
-		alignItems: "center",
-		paddingHorizontal: 20,
-		zIndex: 5,
-	},
-	glassBtn: {
-		width: 48,
-		height: 48,
-		borderRadius: 24,
-		backgroundColor: "rgba(255,255,255,0.15)",
-		justifyContent: "center",
-		alignItems: "center",
-		borderWidth: 1,
-		borderColor: "rgba(255,255,255,0.2)",
-	},
-	modeBadge: {
-		flexDirection: "row",
-		alignItems: "center",
-		paddingHorizontal: 16,
-		paddingVertical: 10,
-		borderRadius: 25,
-		overflow: "hidden",
-		borderWidth: 1,
-		borderColor: "rgba(255,255,255,0.1)",
-	},
-	activeDot: {
-		width: 6,
-		height: 6,
-		borderRadius: 3,
-		backgroundColor: "#00FF94",
-		marginRight: 8,
-	},
-	modeText: {
-		color: COLORS.white,
-		fontSize: 11,
-		fontWeight: "900",
-		letterSpacing: 1,
-	},
-	// Bottom
-	bottomArea: {
-		position: "absolute",
-		bottom: 0,
-		left: 0,
-		right: 0,
-		zIndex: 5,
-	},
-	filterScroll: { paddingHorizontal: 20, paddingBottom: 30 },
-	filterItem: { alignItems: "center", marginRight: 20 },
-	filterRing: {
-		width: 66,
-		height: 66,
-		borderRadius: 33,
-		borderWidth: 3,
-		borderColor: "transparent",
-		padding: 2,
-		marginBottom: 8,
-	},
-	filterImg: { width: "100%", height: "100%", borderRadius: 30 },
-	downloadBadge: {
-		position: "absolute",
-		bottom: 0,
-		right: 0,
-		backgroundColor: "rgba(0,0,0,0.6)",
-		borderRadius: 12,
-		padding: 4,
-	},
-	filterLabel: {
-		color: COLORS.white,
-		fontSize: 11,
+	loadingText: {
+		color: "#fff",
+		fontSize: 16,
 		fontWeight: "600",
-		opacity: 0.9,
-	},
-	actionRow: {
-		flexDirection: "row",
-		justifyContent: "space-evenly",
-		alignItems: "center",
-		paddingHorizontal: 20,
-	},
-	sideAction: { alignItems: "center", width: 70 },
-	sideIconBox: {
-		width: 50,
-		height: 50,
-		borderRadius: 16,
-		justifyContent: "center",
-		alignItems: "center",
-		overflow: "hidden",
-	},
-	sideText: {
-		color: COLORS.white,
-		fontSize: 11,
-		fontWeight: "700",
-		marginTop: 8,
-	},
-	galleryPreview: {
-		width: 50,
-		height: 50,
-		borderRadius: 16,
-		borderWidth: 2,
-		borderColor: COLORS.white,
-	},
-	shutterOuter: {
-		width: 88,
-		height: 88,
-		borderRadius: 44,
-		borderWidth: 5,
-		borderColor: COLORS.white,
-		justifyContent: "center",
-		alignItems: "center",
-	},
-	shutterInner: {
-		width: 68,
-		height: 68,
-		borderRadius: 34,
-		backgroundColor: COLORS.white,
 	},
 });
