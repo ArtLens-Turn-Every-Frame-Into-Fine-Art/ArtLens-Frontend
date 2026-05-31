@@ -9,6 +9,28 @@
  * - Provide safe surface garbage collection to prevent frame buffer resource leak profiles
  * - Off-screen composite snapshot generation for the EditCanvas → Refine pipeline handoff
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CHANGES (this revision)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *  FIX A — CRITICAL: compositeStyleFrame denormalization corrected.
+ *    Was: rawBytes[i] = Math.floor(outputTensor[i] * 255)
+ *    The outputTensor is raw float32 model output in [-1, 1] (Tanh activation).
+ *    Multiplying by 255 maps the [-1, 0) range to negative byte values which
+ *    clamp to 0, and maps [0, 1] to [0, 255] — effectively discarding all
+ *    negative model activations and producing a washed-out, bright image.
+ *
+ *    Now: rawBytes[i] = clamp(Math.floor((outputTensor[i] + 1.0) * 127.5), 0, 255)
+ *    This is the correct inverse of the CUT training normalization:
+ *      training:   (pixel/255 − 0.5) / 0.5  =  pixel/127.5 − 1.0  →  [-1, 1]
+ *      display:    (model_out + 1.0) * 127.5                        →  [0, 255]
+ *
+ *    The function accepts a Float32Array (raw model output) or a pre-decoded
+ *    Float32Array in [0, 1]. The `tensorIsRaw` parameter controls which formula
+ *    is applied:
+ *      tensorIsRaw=true  (default) : raw Tanh output in [-1, 1] → denormalize
+ *      tensorIsRaw=false           : already decoded [0, 1]     → scale by 255
+ *
  * PRD § 5 — Directory: src/shared/renderers/SkiaRenderer.ts
  */
 
@@ -42,6 +64,18 @@ export interface RenderPipelineOptions {
 	colorMode?: 'rgb' | 'yuv'
 	/** Absolute target clipping dimensions for layout adjustments */
 	clippingBounds?: { width: number; height: number }
+	/**
+	 * Whether outputTensor contains raw Tanh model output in [-1, 1].
+	 *
+	 * true  (default) — outputTensor holds raw float32 from TFLite in [-1, 1].
+	 *                   Denormalization: byte = clamp((v + 1.0) * 127.5, 0, 255)
+	 *                   This is the CUT model output normalization inverse.
+	 *
+	 * false           — outputTensor has already been decoded to [0, 1] (e.g.
+	 *                   via decodeModelOutput() or stitchTiles()). No shift needed.
+	 *                   Conversion: byte = clamp(v * 255, 0, 255)
+	 */
+	tensorIsRaw?: boolean
 }
 
 export interface RenderingContextMetrics {
@@ -63,6 +97,27 @@ export class SkiaRenderer {
 
 	/**
 	 * Processes style outputs into hardware accelerated Skia Canvas interfaces cleanly.
+	 *
+	 * TENSOR PRECISION CONTRACT:
+	 *   Both teacher (512×512) and student (256×256) models output float32 in [-1, 1]
+	 *   via a Tanh activation (CUT architecture). The `tensorIsRaw` option controls
+	 *   how values are converted to display bytes:
+	 *
+	 *   tensorIsRaw=true  (default):
+	 *     byte = clamp(floor((v + 1.0) * 127.5), 0, 255)
+	 *     Correctly maps [-1, 1] → [0, 255], symmetric around 0.
+	 *
+	 *   tensorIsRaw=false:
+	 *     byte = clamp(floor(v * 255), 0, 255)
+	 *     Use when outputTensor has already been denormalized to [0, 1]
+	 *     (e.g., via stitchTiles() or decodeModelOutput()).
+	 *
+	 * CHANNEL LAYOUT:
+	 *   outputTensor must be NHWC with batch dimension removed: [H, W, 3] interleaved.
+	 *   For teacher: length = 512 × 512 × 3 = 786,432 floats.
+	 *   For student: length = 256 × 256 × 3 = 196,608 floats.
+	 *   The shape parameter drives the Skia image info — width and height must
+	 *   match the model's tile resolution (512 or 256).
 	 */
 	public compositeStyleFrame(
 		canvas: SkCanvas,
@@ -72,23 +127,37 @@ export class SkiaRenderer {
 	): RenderingContextMetrics {
 		const startTime = Date.now()
 
-		// FIXED: Skipped the unused batch parameter to eliminate the eslint error completely
+		// FIXED: Skipped the unused batch parameter to eliminate the eslint error
 		const [, height, width, channels] = shape
 
 		const blendRatio =
 			options.luminanceBlend ?? DEFAULT_MODEL_CONFIG.luminanceBlend
 		this._sharedPaint.setAlphaf(blendRatio)
 
-		// Convert raw output buffers into Skia structural byte handles
+		// Determine which denormalization formula to apply.
+		// tensorIsRaw defaults to true — both models produce raw Tanh output.
+		const tensorIsRaw = options.tensorIsRaw !== false
+
+		// Convert raw float32 model output into display-ready RGBA bytes.
 		const totalByteAllocation = width * height * channels
 		const rawBytes = new Uint8Array(totalByteAllocation)
 
-		// De-normalize and translate float models into byte matrices
-		for (let i = 0; i < outputTensor.length; i++) {
-			rawBytes[i] = Math.min(
-				Math.max(Math.floor(outputTensor[i] * 255), 0),
-				255
-			)
+		if (tensorIsRaw) {
+			// FIX A: Raw Tanh output in [-1, 1].
+			// Denormalization: (v + 1.0) * 127.5   maps -1 → 0, 0 → 127.5, 1 → 255.
+			// This is the inverse of CUT training normalization:
+			//   (pixel/255 − 0.5) / 0.5 = pixel/127.5 − 1.0   →   [-1, 1]
+			for (let i = 0; i < outputTensor.length; i++) {
+				const v = (outputTensor[i] + 1.0) * 127.5
+				rawBytes[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+			}
+		} else {
+			// Already decoded to [0, 1] (e.g., from decodeModelOutput or stitchTiles).
+			// Simple scale: v * 255, clamped.
+			for (let i = 0; i < outputTensor.length; i++) {
+				const v = outputTensor[i] * 255
+				rawBytes[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+			}
 		}
 
 		const skiaData = Skia.Data.fromBytes(rawBytes)
@@ -134,7 +203,7 @@ export class SkiaRenderer {
 
 		return {
 			drawDurationMs: Date.now() - startTime,
-			// FIXED: Uses the processed byte length directly ensuring type-safety across library upgrades
+			// FIXED: Uses the processed byte length directly ensuring type-safety
 			allocatedBufferBytes: rawBytes.length,
 			compositionPasses: this._totalFramesRendered,
 		}
@@ -284,7 +353,7 @@ export class SkiaRenderer {
 				)
 			}
 
-			// Construct target file instance inside the modern directory directory structure
+			// Construct target file instance inside the modern directory structure
 			const outputUri = `${Paths.cache.uri}/composite_output_${Date.now()}.jpg`
 			const outputFile = new File(outputUri)
 
@@ -313,7 +382,7 @@ export class SkiaRenderer {
 				// Best-effort disposal
 			}
 			try {
-				// SkSurface: release its underlying pixel buffer
+				// SkSurface: release its underlying pixel buffer.
 				// Note: surface.dispose() may not exist on all RN Skia versions;
 				// the surface will be GC'd when it goes out of scope.
 				// We explicitly null it to drop the JS reference immediately.

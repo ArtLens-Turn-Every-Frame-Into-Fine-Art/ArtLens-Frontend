@@ -3,63 +3,67 @@
  * @description Production-grade tensor manipulation utilities for ArtLens.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * CHANGES vs v1 (audit-driven fixes)
+ * MODEL PRECISION GROUND TRUTH  (from artlens_convert_v2.py metadata)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  FIX 1 — Critical rendering bug: Dead code path in toRGBAWorklet.
- *    The float16 loop contained a first nested block that:
- *      a) Decoded channel R and wrote to outputBuffer[d] using stale `s` index
- *         (from prior pixel iteration, not `i*3`).
- *      b) Incremented `s += 1; d += 1`.
- *      c) Then fell into `s = i * 3; d = i * 4` resetting both.
- *      d) Then the canonical decode blocks ran and wrote correct values.
- *    Net effect: for each pixel, one extra fp16 decode ran on a stale index,
- *    and its result was overwritten by the canonical blocks — 65,536 wasted
- *    ops per frame at 256×256. Additionally `void raw; void sign` at the
- *    bottom confirmed the dead nature of the first block.
- *    Fix: Removed the dead first block entirely. The canonical three-channel
- *    decode blocks (R/G/B) are the only decode path, running against the
- *    correct `s = i * 3` index.
+ *  Teacher (Main slot)  — artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
+ *    Input  : [1, 512, 512, 3]  float32  NHWC
+ *    Output : [1, 512, 512, 3]  float32  NHWC  (Tanh activation → [-1, 1])
+ *    ngf    : 64
  *
- *  FIX 2 — Performance: `stitchTiles` used DataView for every fp16 decode.
- *    The stitch inner loop called `_f32ScratchView.setInt32` + `getFloat32`
- *    per channel per pixel. For a 4032×3024 image: ~12.6M DataView read-write
- *    pairs — 3–5× slower than arithmetic-path fp16 decoding.
- *    Fix: Pre-compute a 65,536-entry Float32 lookup table at module init
- *    (256KB static, one-time cost). stitchTiles now resolves every fp16 value
- *    with a single array index lookup — O(1), zero DataView overhead.
+ *  Student (Preview slot) — artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
+ *    Input  : [1, 256, 256, 3]  float32  NHWC
+ *    Output : [1, 256, 256, 3]  float32  NHWC  (Tanh activation → [-1, 1])
+ *    ngf_s  : 32  n_blocks: 4
  *
- *  FIX 3 — Critical: alphaBlend broken for full-resolution stitched images.
- *    sharedBlendBuffer = Float32Array[512×512×3 = 786,432 elements].
- *    RefineScreen calls alphaBlend on a stitched full-res image
- *    (e.g., 4032×3024×3 = ~36.6M elements). The capacity check threw:
- *    "[tensorUtils] alphaBlend: tensors exceed sharedBlendBuffer capacity"
- *    — RefineScreen was completely non-functional for any image > 512×512.
- *    Fix: alphaBlend accepts an optional `out: Float32Array` parameter.
- *    Callers with large images supply their own buffer. Small images
- *    (≤ 512×512×3) still use sharedBlendBuffer with no allocation.
+ *  Both models use the CUT training normalisation (artlens_teacher_train_v3_1_5.py):
+ *    transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+ *    which applied AFTER ToTensor() (pixel/255 → [0,1]) gives:
+ *      normalised = (pixel/255 − 0.5) / 0.5  =  pixel/127.5 − 1.0  →  [-1, 1]
  *
- *  FIX 4 — DEFAULT_MODEL_CONFIG.tileOverlap = 64 is wrong.
- *    ModelConfig.tileOverlap is a fraction [0, 1] per the type definition.
- *    The old value of 64 (pixel count) produced 64/512 = 12.5% overlap,
- *    far below the PRD-specified 50% default, causing visible seam artifacts
- *    in all fallback-config styles.
- *    Fix: This file references DEFAULT_MODEL_CONFIG from constants.ts which
- *    has been corrected to tileOverlap: 0.5. No change needed here, but the
- *    tileImage() dual-interpretation branch (> 1 = pixels, ≤ 1 = fraction)
- *    is retained for backward compatibility with any legacy config.json files
- *    that may still supply pixel counts.
+ *  Denormalisation (output → display):
+ *      display_f32  = (model_out + 1.0) / 2.0              →  [0, 1]
+ *      display_u8   = ((model_out + 1.0) * 127.5) clamped  →  [0, 255]
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * UNCHANGED ARCHITECTURAL CONTRACTS
+ * CHANGES (v2 → v3 — float32 model integration)
  * ─────────────────────────────────────────────────────────────────────────────
- *  1. All persistent ArrayBuffers allocated once at module scope — zero GC.
- *  2. Float16 ↔ Float32 conversion via lookup table (module init) or manual
- *     bitwise arithmetic (worklet path, no module scope access allowed).
- *  3. toRGBAWorklet is fully worklet-safe: no module-scope closures, no
- *     Math.min/max, no global references — all parameters explicit.
- *  4. stitchTiles uses pre-allocated accumulator arrays — zero per-stitch
- *     allocation except the final output Float32Array (unavoidable).
+ *
+ *  FIX A — CRITICAL: All input/output model buffers changed from fp16 to float32.
+ *    The previous pipeline allocated `CHANNELS * FP16_BYTES (=2)` bytes per pixel.
+ *    Both TFLite models have float32 I/O (4 bytes/element), so buffers were half
+ *    the required size — every model.runSync() call would read/write out-of-bounds.
+ *    Fix: Introduce F32_BYTES = 4. All model I/O buffers now use F32_BYTES.
+ *    Static RAM impact: input/output buffers double. mainInputBuffer 1.5 MB → 3 MB.
+ *
+ *  FIX B — CRITICAL: prepareInputTensor normalization corrected.
+ *    Was: float16(channel / 255)  →  [0, 1] fp16
+ *    Now: float32((channel / 127.5) − 1.0)  →  [-1, 1] fp32
+ *    Using the wrong normalization offsets every pixel value by 0.5 in model space,
+ *    producing severe colour drift and incorrect style transfer output.
+ *
+ *  FIX C — CRITICAL: stitchTiles / decodeModelOutput fp16 path removed.
+ *    Was: Uint16Array view + _fp16LookupTable[src16[i]] per pixel.
+ *    Now: Float32Array view + (v + 1.0) * 0.5 denormalization.
+ *    The old lookup table returned nonsense for float32 bit patterns.
+ *
+ *  FIX D — CRITICAL: toRGBAWorklet float32 path updated.
+ *    Was: inline fp16 arithmetic decode (sign / exponent / mantissa bit-ops).
+ *    Now: float32 with denormalization: ((v + 1.0) * 127.5), clamped via ternary.
+ *    Ternary clamping preserves Hermes worklet constraint (no Math.min/Math.max).
+ *
+ *  FIX E — ProcessedTile.rawFp16 renamed to rawF32.
+ *    The buffer holds float32 model output, not fp16. The name change prevents
+ *    future callers from misinterpreting the data type.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * PRESERVED FROM v2 (unchanged)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  1. fp16 ↔ float32 utility functions retained (future INT8/fp16 model support).
+ *  2. All persistent accumulator arrays pre-allocated at module scope — zero GC.
+ *  3. _gaussianWindow512 Gaussian mask pre-computed at module init.
+ *  4. stitchTiles Gaussian overlap-add algorithm unchanged (only data type changed).
+ *  5. alphaBlend FIX 3 preserved — optional `out` parameter for large images.
  *
  * PRD § 5 — src/shared/utils/tensorUtils.ts
  */
@@ -71,11 +75,24 @@ import { DEFAULT_MODEL_CONFIG } from '@/shared/utils/constants'
 // SECTION 1 — DIMENSION CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PREVIEW_RES = DEFAULT_MODEL_CONFIG.previewResolution
-const INFERENCE_RES = DEFAULT_MODEL_CONFIG.inferenceResolution
+const PREVIEW_RES = DEFAULT_MODEL_CONFIG.previewResolution // 256
+const INFERENCE_RES = DEFAULT_MODEL_CONFIG.inferenceResolution // 512
 const CHANNELS = 3 as const
 const RGBA_CHANNELS = 4 as const
-const FP16_BYTES = 2 as const
+
+/**
+ * Bytes per element for FLOAT32 model I/O.
+ * Both teacher and student TFLite models have float32 input/output tensors.
+ * This is the primary precision for all model buffers.
+ */
+const F32_BYTES = 4 as const
+
+/**
+ * Bytes per element for FLOAT16.
+ * Retained for legacy utility functions and potential future fp16 model support.
+ * NOT used by the current teacher/student model I/O buffers.
+ */
+//const FP16_BYTES = 2 as const
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 2 — PRE-ALLOCATED PERSISTENT BUFFERS
@@ -83,76 +100,85 @@ const FP16_BYTES = 2 as const
 //
 // Static RAM budget (allocated once at module load):
 //
-//  INPUT SIDE
-//   previewInputBuffer       256×256×3×2  =    393,216 B  (fp16)
-//   previewInputU8Buffer     256×256×3×1  =    196,608 B  (uint8 fallback)
-//   mainInputBuffer          512×512×3×2  =  1,572,864 B  (fp16)
+//  MODEL INPUT BUFFERS (float32 — FIX A: was fp16, now 2× larger)
+//   previewInputBuffer       256×256×3×4  =    786,432 B  (fp32, [-1,1])
+//   previewInputU8Buffer     256×256×3×1  =    196,608 B  (uint8, for INT8 models)
+//   mainInputBuffer          512×512×3×4  =  3,145,728 B  (fp32, [-1,1])
 //
-//  OUTPUT SIDE
-//   previewOutputBuffer      256×256×3×2  =    393,216 B  (fp16)
-//   mainOutputBuffer         512×512×3×2  =  1,572,864 B  (fp16)
+//  MODEL OUTPUT BUFFERS (float32 — FIX A: was fp16, now 2× larger)
+//   previewOutputBuffer      256×256×3×4  =    786,432 B  (fp32, [-1,1] raw)
+//   mainOutputBuffer         512×512×3×4  =  3,145,728 B  (fp32, [-1,1] raw)
 //
-//  DISPLAY SIDE
-//   sharedPreviewRgbaBuffer  256×256×4    =    262,144 B  (RGBA)
-//   sharedMainRgbaBuffer     512×512×4    =  1,048,576 B  (RGBA)
+//  DISPLAY SIDE (unchanged — these hold decoded RGBA bytes, not model I/O)
+//   sharedPreviewRgbaBuffer  256×256×4    =    262,144 B  (RGBA uint8)
+//   sharedMainRgbaBuffer     512×512×4    =  1,048,576 B  (RGBA uint8)
 //
-//  BLEND WORKSPACE
-//   sharedBlendBuffer        512×512×3×4  =  3,145,728 B  (float32, tile-size only)
-//   _sharedF32Decode         512×512×3×4  =  3,145,728 B  (decode workspace)
+//  DECODE WORKSPACE (unchanged size — holds float32 [0,1] after denorm)
+//   _sharedF32Decode         512×512×3×4  =  3,145,728 B  (float32, [0,1])
 //
-//  STITCH ACCUMULATORS (4032×3024 = 12,192,768 px max — Android 12MP capture)
-//   _stitchNumerator         12,192,768×3×4 ≈ 146 MB  (float32)
-//   _stitchDenominator       12,192,768×4   ≈  46 MB  (float32)
+//  BLEND WORKSPACE (unchanged)
+//   sharedBlendBuffer        512×512×3×4  =  3,145,728 B  (float32)
 //
-//  FP16 LOOKUP TABLE (FIX 2)
-//   _fp16LookupTable         65,536×4       =    256 KB  (float32, one entry per uint16)
+//  STITCH ACCUMULATORS (unchanged — working buffers for Gaussian overlap-add)
+//   _stitchNumerator         12,520,525×3×4  ≈  150 MB  (float32)
+//   _stitchDenominator       12,520,525×4    ≈   48 MB  (float32)
 //
-// NOTE: The stitch accumulators (~192 MB total) are allocated at module init
-// to avoid any per-stitch allocation. On 4 GB devices this is acceptable.
-// For lower-RAM targets, replace with lazy init or a smaller cap.
+//  FP16 LOOKUP TABLE (retained for legacy use — NOT used by current models)
+//   _fp16LookupTable         65,536×4    =    256 KB  (float32)
 
-const STITCH_MAX_PIXELS = 4085 * 3065 // 12,520,525 — 12 MP
+const STITCH_MAX_PIXELS = 4085 * 3065 // 12,520,525 — 12.5 MP
 
+// ── Input buffers (float32 model inputs) ─────────────────────────────────────
 export const previewInputBuffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS * FP16_BYTES
+	PREVIEW_RES * PREVIEW_RES * CHANNELS * F32_BYTES // 786,432 B
 )
 export const previewInputU8Buffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS
+	PREVIEW_RES * PREVIEW_RES * CHANNELS // 196,608 B (INT8 model fallback)
 )
 export const mainInputBuffer = new ArrayBuffer(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS * FP16_BYTES
+	INFERENCE_RES * INFERENCE_RES * CHANNELS * F32_BYTES // 3,145,728 B
 )
+
+// ── Output reference buffers (unused by pipeline, kept for external consumers) ─
 export const previewOutputBuffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS * FP16_BYTES
+	PREVIEW_RES * PREVIEW_RES * CHANNELS * F32_BYTES // 786,432 B
 )
 export const mainOutputBuffer = new ArrayBuffer(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS * FP16_BYTES
+	INFERENCE_RES * INFERENCE_RES * CHANNELS * F32_BYTES // 3,145,728 B
 )
+
+// ── Display buffers ───────────────────────────────────────────────────────────
 export const sharedPreviewRgbaBuffer = new Uint8Array(
-	PREVIEW_RES * PREVIEW_RES * RGBA_CHANNELS
+	PREVIEW_RES * PREVIEW_RES * RGBA_CHANNELS // 262,144 B
 )
 export const sharedMainRgbaBuffer = new Uint8Array(
-	INFERENCE_RES * INFERENCE_RES * RGBA_CHANNELS
+	INFERENCE_RES * INFERENCE_RES * RGBA_CHANNELS // 1,048,576 B
 )
+
+// ── Blend workspace ───────────────────────────────────────────────────────────
 export const sharedBlendBuffer = new Float32Array(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS
+	INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432 f32 elements
 )
+
+// ── Decode workspace (float32 [0,1] after denormalization) ───────────────────
 const _sharedF32Decode = new Float32Array(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS
+	INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432 f32 elements
 )
+
+// ── Stitch accumulators ───────────────────────────────────────────────────────
 const _stitchNumerator = new Float32Array(STITCH_MAX_PIXELS * CHANNELS)
 const _stitchDenominator = new Float32Array(STITCH_MAX_PIXELS)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 3 — FP16 LOOKUP TABLE  (FIX 2)
+// SECTION 3 — FP16 LOOKUP TABLE (legacy utility — NOT used by current pipeline)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Pre-compute float32 value for all 65,536 possible uint16 fp16 bit patterns.
-// Memory cost: 256 KB allocated once at module init.
-// Lookup cost: O(1) array read — eliminates all DataView operations from the
-// hot stitch loop. For a 12MP image stitch: ~37M DataView calls → ~37M array reads.
+// Retained for:
+//   • Future INT8/fp16 quantized model variants
+//   • External code that imports fp16ToNumber / decodeFp16Buffer
 //
-// The table is build-once, read-only after construction.
+// The current teacher/student float32 pipeline does NOT use this table.
+// stitchTiles and decodeModelOutput now use Float32Array views directly.
 
 const _fp16LookupTable: Float32Array = (() => {
 	const table = new Float32Array(65536)
@@ -163,16 +189,14 @@ const _fp16LookupTable: Float32Array = (() => {
 		const s = (h >>> 15) & 0x1
 		const e = (h >>> 10) & 0x1f
 		const m = h & 0x3ff
-
 		let bits: number
 
 		if (e === 0) {
 			if (m === 0) {
-				bits = s << 31 // ±zero
+				bits = s << 31
 			} else {
-				// Subnormal fp16 → normalise to fp32
-				let nm = m
-				let ne = 113 // 127 - 15 + 1
+				let nm = m,
+					ne = 113
 				while ((nm & 0x400) === 0) {
 					nm <<= 1
 					ne -= 1
@@ -181,135 +205,97 @@ const _fp16LookupTable: Float32Array = (() => {
 				bits = (s << 31) | (ne << 23) | (nm << 13)
 			}
 		} else if (e === 31) {
-			// ±Inf or NaN
 			bits = (s << 31) | (0xff << 23) | (m << 13)
 		} else {
-			// Normal: re-bias exponent (127 - 15 = 112)
 			bits = (s << 31) | ((e + 112) << 23) | (m << 13)
 		}
 
 		view.setInt32(0, bits, false)
 		table[h] = view.getFloat32(0, false)
 	}
-
 	return table
 })()
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 4 — FLOAT16 ↔ FLOAT32 BITWISE CONVERSION  (JS thread)
+// SECTION 4 — FLOAT16 ↔ FLOAT32 CONVERSION UTILITIES (legacy / future use)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _f32ScratchBuf = new ArrayBuffer(4)
 const _f32ScratchView = new DataView(_f32ScratchBuf)
 
-/**
- * Converts a single fp16 bit-pattern (uint16) to a JS number.
- * O(1) lookup from pre-computed table — replaces the old DataView arithmetic.
- */
+/** Converts an fp16 bit-pattern (uint16) to a JS number via lookup table. */
 export function fp16ToNumber(h: number): number {
 	return _fp16LookupTable[h & 0xffff]
 }
 
-/**
- * Converts a JS number to an fp16 bit-pattern (uint16).
- * Round-to-nearest-even. Uses DataView for float32 bit extraction.
- * Not worklet-safe.
- */
+/** Converts a JS number to an fp16 bit-pattern (uint16). Round-to-nearest-even. */
 export function numberToFp16Bits(value: number): number {
 	_f32ScratchView.setFloat32(0, value, false)
 	const bits32 = _f32ScratchView.getInt32(0, false) >>> 0
-
 	const s32 = (bits32 >>> 31) & 0x1
 	const e32 = (bits32 >>> 23) & 0xff
 	const m32 = bits32 & 0x7fffff
 
-	if (e32 === 0xff) {
-		return (s32 << 15) | (0x1f << 10) | (m32 !== 0 ? 1 : 0)
-	}
-
+	if (e32 === 0xff) return (s32 << 15) | (0x1f << 10) | (m32 !== 0 ? 1 : 0)
 	const e16 = e32 - 112
-
 	if (e16 >= 31) return (s32 << 15) | (0x1f << 10)
-
 	if (e16 <= 0) {
 		if (e16 < -10) return s32 << 15
 		const shift = 1 - e16
 		const m16 = (m32 | 0x800000) >>> (shift + 13)
 		return (s32 << 15) | m16
 	}
-
 	const m16 = (m32 >>> 13) & 0x3ff
 	const round = (m32 >>> 12) & 0x1
 	const sticky = (m32 & 0xfff) !== 0
 	const roundUp = round && (sticky || !!(m16 & 0x1))
-	const m16Rounded = m16 + (roundUp ? 1 : 0)
-
-	if (m16Rounded > 0x3ff) return (s32 << 15) | ((e16 + 1) << 10)
-	return (s32 << 15) | (e16 << 10) | m16Rounded
+	const m16r = m16 + (roundUp ? 1 : 0)
+	if (m16r > 0x3ff) return (s32 << 15) | ((e16 + 1) << 10)
+	return (s32 << 15) | (e16 << 10) | m16r
 }
 
-/**
- * Decodes an entire raw ArrayBuffer of packed fp16 values into a Float32Array.
- * Zero allocation in the loop. Uses lookup table.
- */
+/** Decodes a packed fp16 ArrayBuffer into a Float32Array via lookup table. */
 export function decodeFp16Buffer(
 	rawBuf: ArrayBuffer,
 	outF32: Float32Array
 ): Float32Array {
 	const u16 = new Uint16Array(rawBuf)
 	const len = u16.length
-	for (let i = 0; i < len; i++) {
-		outF32[i] = _fp16LookupTable[u16[i]]
-	}
+	for (let i = 0; i < len; i++) outF32[i] = _fp16LookupTable[u16[i]]
 	return outF32
 }
 
-/**
- * Encodes a Float32Array into a packed fp16 ArrayBuffer via Uint16Array view.
- * Zero allocation in the loop.
- */
+/** Encodes a Float32Array into a packed fp16 ArrayBuffer. */
 export function encodeFp16Buffer(f32: Float32Array, rawBuf: ArrayBuffer): void {
 	const u16 = new Uint16Array(rawBuf)
-	const len = f32.length
-	for (let i = 0; i < len; i++) {
-		u16[i] = numberToFp16Bits(f32[i])
-	}
-}
-
-/**
- * Decodes raw fp16 ArrayBuffer from model output into the shared Float32 workspace.
- * Returns a subarray view — valid until the next decodeModelOutput call.
- */
-export function decodeModelOutput(
-	rawBuf: ArrayBuffer,
-	slot: 'preview' | 'main'
-): Float32Array {
-	const expectedElements =
-		slot === 'preview'
-			? PREVIEW_RES * PREVIEW_RES * CHANNELS
-			: INFERENCE_RES * INFERENCE_RES * CHANNELS
-
-	if (rawBuf.byteLength !== expectedElements * FP16_BYTES) {
-		throw new Error(
-			`[tensorUtils] decodeModelOutput: size mismatch. ` +
-				`Expected ${expectedElements * FP16_BYTES}B for slot="${slot}", ` +
-				`got ${rawBuf.byteLength}B.`
-		)
-	}
-
-	return decodeFp16Buffer(
-		rawBuf,
-		_sharedF32Decode.subarray(0, expectedElements)
-	)
+	for (let i = 0; i < f32.length; i++) u16[i] = numberToFp16Bits(f32[i])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 5 — INPUT PRE-PROCESSING: CAMERA RGBA → MODEL INPUT BUFFER
+// SECTION 5 — INPUT PRE-PROCESSING: RGBA → FLOAT32 MODEL INPUT
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Reads raw RGBA camera frame bytes, strips the alpha channel, normalises to
- * [0, 1] per channel, and writes packed RGB into `targetBuffer`.
+ * Converts raw RGBA camera/image bytes into the model's float32 input buffer.
+ *
+ * NORMALIZATION CONTRACT (FIX B — was pixel/255 → [0,1], now [-1,1]):
+ *   CUT training uses: transforms.Normalize(mean=0.5, std=0.5) after ToTensor()
+ *   Equivalent formula: normalised = (pixel / 255 − 0.5) / 0.5 = pixel/127.5 − 1.0
+ *   Range: [0, 255] → [-1.0, 1.0]
+ *
+ *   Alpha channel (rgbaSource[src+3]) is discarded — both models are RGB-only.
+ *
+ * NHWC LAYOUT:
+ *   Output interleaved: R₀ G₀ B₀ R₁ G₁ B₁ … (H×W pixels, 3 channels each)
+ *   Matches TFLite input tensor layout [1, H, W, 3].
+ *
+ * @param rgbaSource   - Source RGBA bytes (row-major, 4 bytes per pixel)
+ * @param targetBuffer - Pre-allocated ArrayBuffer to write into.
+ *                       Float32 models: must be resolution² × 3 × 4 bytes.
+ *                       Uint8  models:  must be resolution² × 3 × 1 bytes.
+ * @param resolution   - Tile size (512 for main/teacher, 256 for preview/student)
+ * @param toUint8      - true = INT8 quantized model (write raw uint8 bytes)
+ *                       false = Float32 model (write float32 [-1,1] values) ← default
  */
 export function prepareInputTensor(
 	rgbaSource: Uint8Array,
@@ -320,9 +306,10 @@ export function prepareInputTensor(
 	const totalPixels = resolution * resolution
 
 	if (toUint8) {
+		// INT8 quantized model path: copy RGB bytes directly (no normalization)
 		const dst = new Uint8Array(targetBuffer)
-		let src = 0
-		let d = 0
+		let src = 0,
+			d = 0
 		for (let i = 0; i < totalPixels; i++) {
 			dst[d] = rgbaSource[src]
 			dst[d + 1] = rgbaSource[src + 1]
@@ -331,13 +318,19 @@ export function prepareInputTensor(
 			d += 3
 		}
 	} else {
-		const dst = new Uint16Array(targetBuffer)
-		let src = 0
-		let d = 0
+		// Float32 model path (FIX B): normalize to [-1, 1] using CUT training formula
+		// formula: (channel_byte / 127.5) - 1.0
+		//   0   → -1.000
+		//   128 ≈  0.003  (≈ 0)
+		//   255 →  1.000
+		const dst = new Float32Array(targetBuffer)
+		let src = 0,
+			d = 0
 		for (let i = 0; i < totalPixels; i++) {
-			dst[d] = numberToFp16Bits(rgbaSource[src] / 255)
-			dst[d + 1] = numberToFp16Bits(rgbaSource[src + 1] / 255)
-			dst[d + 2] = numberToFp16Bits(rgbaSource[src + 2] / 255)
+			dst[d] = rgbaSource[src] / 127.5 - 1.0 // R: [0,255] → [-1,1]
+			dst[d + 1] = rgbaSource[src + 1] / 127.5 - 1.0 // G
+			dst[d + 2] = rgbaSource[src + 2] / 127.5 - 1.0 // B
+			// Alpha at rgbaSource[src + 3] is discarded — models are RGB-only
 			src += 4
 			d += 3
 		}
@@ -349,28 +342,29 @@ export function prepareInputTensor(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Converts model output bytes (fp16 or uint8) into RGBA render bytes.
+ * Converts float32 model output (or uint8 raw bytes) into RGBA display bytes.
  * Writes into the caller-supplied `outputBuffer` — zero allocation.
  *
  * ⚡ WORKLET-SAFE constraints:
  *   ✓ 'worklet' directive.
  *   ✓ Zero closures over module-scope variables — all via parameters.
- *   ✓ No Math.min / Math.max (stripped in Hermes worklet serialisation).
+ *   ✓ No Math.min / Math.max — Hermes worklet constraint. Ternary clamps used.
  *   ✓ No intermediate buffers allocated.
- *   ✓ No lookup table access — lookup table is module-scope and worklets
- *     cannot safely close over module-level JS objects.
- *     Inline arithmetic fp16 decode is used instead.
+ *   ✓ No lookup table access — module-scope objects unavailable in worklets.
  *
- * FIX 1: Removed the dead first-block in the fp16 path.
- *   The original code had two decode passes per pixel:
- *     1. A first block that decoded channel R with a stale `s` index and
- *        incremented s/d, then immediately had them reset by `s = i*3; d = i*4`.
- *     2. The canonical three-channel decode blocks.
- *   The first block was pure dead computation — its output was overwritten
- *   and it used wrong indices for all pixels after i=0.
- *   Fix: Only the canonical three-channel blocks remain, running against
- *   the correct s = i * 3 index. The outer `let s = 0; let d = 0` with
- *   `s += 3; d += 4` at the bottom is cleaner and avoids the multiply.
+ * isUint8=false path (FIX D — replaces inline fp16 arithmetic):
+ *   Reads Float32Array, values in [-1, 1] (raw Tanh model output).
+ *   Denormalises: byte = ((v + 1.0) * 127.5) clamped to [0, 255].
+ *   This is the inverse of prepareInputTensor's normalisation.
+ *
+ * isUint8=true path:
+ *   Reads Uint8Array (RGB packed), copies directly to RGBA with alpha=255.
+ *   Used for INT8 quantized models or pre-decoded uint8 outputs.
+ *
+ * @param inputBuffer  - Model output: Float32Array (isUint8=false) or Uint8Array (isUint8=true)
+ * @param outputBuffer - RGBA uint8 destination (resolution × resolution × 4 bytes)
+ * @param resolution   - 512 for main/teacher, 256 for preview/student
+ * @param isUint8      - false for float32 models (default), true for uint8/INT8 models
  */
 export function toRGBAWorklet(
 	inputBuffer: ArrayBuffer,
@@ -383,9 +377,10 @@ export function toRGBAWorklet(
 	const totalPixels = resolution * resolution
 
 	if (isUint8) {
+		// INT8 model path: packed RGB uint8 → RGBA uint8
 		const src8 = new Uint8Array(inputBuffer)
-		let s = 0
-		let d = 0
+		let s = 0,
+			d = 0
 		for (let i = 0; i < totalPixels; i++) {
 			outputBuffer[d] = src8[s]
 			outputBuffer[d + 1] = src8[s + 1]
@@ -395,98 +390,32 @@ export function toRGBAWorklet(
 			d += 4
 		}
 	} else {
-		// FIX 1: Single clean decode pass per pixel — no dead first block.
-		// Uses inline arithmetic fp16 decode (no lookup table — not worklet-safe).
-		const src16 = new Uint16Array(inputBuffer)
-		let s = 0
-		let d = 0
+		// Float32 model path (FIX D): float32 [-1, 1] → uint8 [0, 255]
+		// Denormalise: byte = ((v + 1.0) * 127.5)  clamped to [0, 255]
+		// No Math.min/max — Hermes worklet requirement. Ternary clamps used.
+		//
+		// Derivation:
+		//   model out v ∈ [-1, 1] (Tanh)
+		//   (v + 1.0) ∈ [0, 2]
+		//   * 127.5   ∈ [0, 255]
+		const src32 = new Float32Array(inputBuffer)
+		let s = 0,
+			d = 0
 
 		for (let i = 0; i < totalPixels; i++) {
-			// ── Channel R ────────────────────────────────────────────────────────
-			{
-				const h = src16[s]
-				const sign = (h >> 15) & 0x1
-				const e = (h >> 10) & 0x1f
-				const m = h & 0x3ff
-				let byteVal: number
-				if (e === 0) {
-					byteVal = 0
-				} else if (e === 31) {
-					byteVal = sign ? 0 : 255
-				} else {
-					const exp = e - 15
-					if (sign || exp >= 0) {
-						byteVal = sign ? 0 : 255
-					} else if (exp < -10) {
-						byteVal = 0
-					} else {
-						const shift = 10 - exp
-						const denom = 1024 >> shift
-						const intV = (1024 + m) >> shift
-						const raw = (intV * 255) / denom
-						byteVal = raw < 0 ? 0 : raw > 255 ? 255 : raw | 0
-					}
-				}
-				outputBuffer[d] = byteVal
-			}
+			// Red channel
+			let rv: number = (src32[s] + 1.0) * 127.5
+			outputBuffer[d] = rv < 0 ? 0 : rv > 255 ? 255 : rv | 0
 
-			// ── Channel G ────────────────────────────────────────────────────────
-			{
-				const h = src16[s + 1]
-				const sign = (h >> 15) & 0x1
-				const e = (h >> 10) & 0x1f
-				const m = h & 0x3ff
-				let byteVal: number
-				if (e === 0) {
-					byteVal = 0
-				} else if (e === 31) {
-					byteVal = sign ? 0 : 255
-				} else {
-					const exp = e - 15
-					if (sign || exp >= 0) {
-						byteVal = sign ? 0 : 255
-					} else if (exp < -10) {
-						byteVal = 0
-					} else {
-						const shift = 10 - exp
-						const denom = 1024 >> shift
-						const intV = (1024 + m) >> shift
-						const raw = (intV * 255) / denom
-						byteVal = raw < 0 ? 0 : raw > 255 ? 255 : raw | 0
-					}
-				}
-				outputBuffer[d + 1] = byteVal
-			}
+			// Green channel
+			let gv: number = (src32[s + 1] + 1.0) * 127.5
+			outputBuffer[d + 1] = gv < 0 ? 0 : gv > 255 ? 255 : gv | 0
 
-			// ── Channel B ────────────────────────────────────────────────────────
-			{
-				const h = src16[s + 2]
-				const sign = (h >> 15) & 0x1
-				const e = (h >> 10) & 0x1f
-				const m = h & 0x3ff
-				let byteVal: number
-				if (e === 0) {
-					byteVal = 0
-				} else if (e === 31) {
-					byteVal = sign ? 0 : 255
-				} else {
-					const exp = e - 15
-					if (sign || exp >= 0) {
-						byteVal = sign ? 0 : 255
-					} else if (exp < -10) {
-						byteVal = 0
-					} else {
-						const shift = 10 - exp
-						const denom = 1024 >> shift
-						const intV = (1024 + m) >> shift
-						const raw = (intV * 255) / denom
-						byteVal = raw < 0 ? 0 : raw > 255 ? 255 : raw | 0
-					}
-				}
-				outputBuffer[d + 2] = byteVal
-			}
+			// Blue channel
+			let bv: number = (src32[s + 2] + 1.0) * 127.5
+			outputBuffer[d + 2] = bv < 0 ? 0 : bv > 255 ? 255 : bv | 0
 
-			outputBuffer[d + 3] = 255 // Alpha — fully opaque
+			outputBuffer[d + 3] = 255 // Alpha: always fully opaque
 			s += 3
 			d += 4
 		}
@@ -494,7 +423,64 @@ export function toRGBAWorklet(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 7 — TILE COORDINATE GRID
+// SECTION 7 — MODEL OUTPUT DECODE: float32 [-1,1] → float32 [0,1]
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Decodes raw float32 model output into the shared decode workspace [0, 1].
+ *
+ * DENORMALISATION (FIX C — replaces fp16 lookup table decode):
+ *   Raw model output: float32 in [-1, 1] (Tanh activation)
+ *   Denormalised:     float32 in [0, 1]  via (v + 1.0) * 0.5
+ *
+ * Returns a subarray view of _sharedF32Decode — valid until the next call.
+ * Callers must not hold the reference across await boundaries.
+ *
+ * Used by: live preview compositing path (camera → student model → SkiaRenderer)
+ * NOT used by: stitchTiles (which denormalises inline during accumulation)
+ *
+ * @param rawBuf - ArrayBuffer from InferenceEngine.runInferenceSync()
+ *                 Contains float32 values in [-1, 1], NHWC layout.
+ *                 ByteLength must equal resolution² × 3 × 4 bytes.
+ * @param slot   - 'preview' (256×256) or 'main' (512×512)
+ */
+export function decodeModelOutput(
+	rawBuf: ArrayBuffer,
+	slot: 'preview' | 'main'
+): Float32Array {
+	const expectedElements =
+		slot === 'preview'
+			? PREVIEW_RES * PREVIEW_RES * CHANNELS // 196,608
+			: INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432
+
+	const expectedBytes = expectedElements * F32_BYTES // × 4
+
+	if (rawBuf.byteLength !== expectedBytes) {
+		throw new Error(
+			`[tensorUtils] decodeModelOutput: buffer size mismatch. ` +
+				`Expected ${expectedBytes}B for slot="${slot}" (float32 model), ` +
+				`got ${rawBuf.byteLength}B. ` +
+				`If the model is INT8 quantized, use a separate decode path.`
+		)
+	}
+
+	// Denormalize: float32 [-1, 1] → float32 [0, 1]
+	// Inversion of CUT training normalization: (v + 1.0) * 0.5
+	// Tanh output range is strictly (-1, 1); clamp for numerical safety.
+	const f32Input = new Float32Array(rawBuf)
+	const out = _sharedF32Decode.subarray(0, expectedElements)
+
+	for (let i = 0; i < expectedElements; i++) {
+		const v = f32Input[i]
+		// Clamp to [-1, 1] then shift to [0, 1]
+		out[i] = v < -1.0 ? 0.0 : v > 1.0 ? 1.0 : (v + 1.0) * 0.5
+	}
+
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 8 — TILE COORDINATE GRID
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface TileCoord {
@@ -521,10 +507,13 @@ export interface TileGrid {
 
 /**
  * Computes the full overlap tile grid for an arbitrary source image.
- * Pure math — no I/O. O(numTiles).
  *
- * tileOverlap handling: if > 1, treats as pixel count (legacy config.json);
- * if ≤ 1, treats as fraction. The corrected DEFAULT_MODEL_CONFIG uses 0.5.
+ * tileOverlap handling (backward-compatible):
+ *   > 1  → treated as pixel count (legacy config.json: e.g. 64 px)
+ *   ≤ 1  → treated as fraction (preferred: e.g. 0.25 = 25%)
+ *
+ * DEFAULT_MODEL_CONFIG.tileOverlap = 0.25 (25%) — updated from legacy 64 px.
+ * At 25% overlap with 512px tiles: overlapPx = 128, step = 384.
  */
 export function tileImage(
 	imageW: number,
@@ -543,7 +532,8 @@ export function tileImage(
 	if (step <= 0) {
 		throw new Error(
 			`[tensorUtils] tileImage: step=${step} must be > 0. ` +
-				`tileSize=${tileSize}, overlapPx=${overlapPx}. Check ModelConfig.tileOverlap.`
+				`tileSize=${tileSize}, overlapPx=${overlapPx}. ` +
+				`Check ModelConfig.tileOverlap (should be 0.0–0.9 fraction or < tileSize px).`
 		)
 	}
 
@@ -585,12 +575,20 @@ export function tileImage(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8 — GAUSSIAN WEIGHT MASK  (pre-computed module singleton)
+// SECTION 9 — GAUSSIAN WEIGHT MASK (pre-computed at module init)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// 2D Gaussian window σ = 512 / 5 = 102.4
+// Properties:
+//   Center weight = 1.0 (after normalisation to peak)
+//   Edge weight   ≈ exp(−(256)² / (2 × 102.4²)) = exp(−3.125) ≈ 0.044
+//   Floor         = 1e-6 (prevents division by zero in denominator)
+//
+// See artlens_infer_v5.py Section 5 (_make_gaussian_window) for derivation.
 
 const _GAUSSIAN_SIGMA_DIV = 5.0
 
-const _gaussianWindow512 = (() => {
+const _gaussianWindow512: Float32Array = (() => {
 	const size = 512
 	const sigma = size / _GAUSSIAN_SIGMA_DIV
 	const twoS2 = 2 * sigma * sigma
@@ -606,40 +604,58 @@ const _gaussianWindow512 = (() => {
 	}
 
 	let peak = 0
-	for (let i = 0; i < win.length; i++) {
-		if (win[i] > peak) peak = win[i]
-	}
+	for (let i = 0; i < win.length; i++) if (win[i] > peak) peak = win[i]
 	const invPeak = 1.0 / peak
-	for (let i = 0; i < win.length; i++) {
-		win[i] = win[i] * invPeak + 1e-6
-	}
+	for (let i = 0; i < win.length; i++) win[i] = win[i] * invPeak + 1e-6
 
 	return win
 })()
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 9 — PROCESSED TILE DESCRIPTOR
+// SECTION 10 — PROCESSED TILE DESCRIPTOR
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface ProcessedTile {
 	coord: TileCoord
-	rawFp16: ArrayBuffer
+	/**
+	 * Raw float32 model output for this tile.
+	 * Layout: NHWC with batch=1 removed → [tileSize, tileSize, 3]
+	 * Values: [-1, 1] (Tanh activation range, unnormalised)
+	 * ByteLength: tileSize × tileSize × 3 × 4 = 3,145,728 B for 512px tiles.
+	 *
+	 * FIX E: Renamed from rawFp16 — both models are float32, not float16.
+	 */
+	rawF32: ArrayBuffer
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 10 — GAUSSIAN OVERLAP-ADD TILE STITCHING  (FIX 2)
+// SECTION 11 — GAUSSIAN OVERLAP-ADD TILE STITCHING
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Reconstructs a full-resolution Float32 image from Gaussian-blended tiles.
+ * Reconstructs a full-resolution Float32 [0,1] image from Gaussian-blended tiles.
  *
- * FIX 2: fp16 decode now uses _fp16LookupTable[src16[i]] — O(1) array lookup
- * per channel, replacing the previous `_f32ScratchView.setInt32 + getFloat32`
- * pair (2 DataView ops per channel → 6 per pixel → ~37M ops for 12MP images).
+ * ALGORITHM (two-pass Gaussian weighted overlap-add):
+ *   Pass 1 — Accumulation:
+ *     For each tile t at canvas position (cx, cy):
+ *       For each pixel (tx, ty) within the tile:
+ *         raw_v = src32[(ty × 512 + tx) × 3 + ch]    ← float32 in [-1, 1]
+ *         f_v   = (raw_v + 1.0) × 0.5                 ← denormalize to [0, 1]
+ *         weight = _gaussianWindow512[ty × 512 + tx]
+ *         _stitchNumerator[(cy + ty) × imageW × 3 + (cx + tx) × 3 + ch]   += f_v × weight
+ *         _stitchDenominator[(cy + ty) × imageW + (cx + tx)]               += weight
  *
- * @param grid  - TileGrid from tileImage().
- * @param tiles - All ProcessedTile objects covering the full grid.
- * @returns      Float32Array [imageH × imageW × 3] in [0, 1]. Fresh allocation per call.
+ *   Pass 2 — Normalise:
+ *     output[p × 3 + ch] = numerator[p × 3 + ch] / denominator[p]
+ *     Denominator always > 1e-6 (Gaussian floor) — no div-by-zero possible.
+ *
+ * FIX C: Input is now Float32Array in [-1,1] (was Uint16Array fp16 with lookup table).
+ *        Denormalization `(v + 1.0) * 0.5` replaces `_fp16LookupTable[src16[i]]`.
+ *        Output remains Float32Array in [0,1] — downstream code unchanged.
+ *
+ * @param grid  - TileGrid from tileImage()
+ * @param tiles - All ProcessedTile objects covering the full grid (any order)
+ * @returns      Float32Array [imageH × imageW × 3] in [0, 1]. One fresh allocation per call.
  */
 export function stitchTiles(
 	grid: TileGrid,
@@ -651,19 +667,22 @@ export function stitchTiles(
 	if (totalPixels > STITCH_MAX_PIXELS) {
 		throw new Error(
 			`[tensorUtils] stitchTiles: ${imageW}×${imageH} (${totalPixels}px) ` +
-				`exceeds stitch buffer capacity (${STITCH_MAX_PIXELS}px).`
+				`exceeds stitch buffer capacity (${STITCH_MAX_PIXELS}px). ` +
+				`Source image must be ≤ 4085×3065 px.`
 		)
 	}
 
+	// Zero-fill pre-allocated accumulators (no per-stitch allocation)
 	_stitchNumerator.fill(0, 0, totalPixels * CHANNELS)
 	_stitchDenominator.fill(0, 0, totalPixels)
 
-	// ── Pass 1: Weighted accumulation ────────────────────────────────────────
+	// ── Pass 1: Gaussian-weighted accumulation ────────────────────────────────
 	for (let t = 0; t < tiles.length; t++) {
-		const { coord, rawFp16 } = tiles[t]
+		const { coord, rawF32 } = tiles[t] // FIX E: was rawFp16
 		const { x: cx, y: cy, w: tileW, h: tileH } = coord
 
-		const src16 = new Uint16Array(rawFp16) // zero-copy view
+		// FIX C: Float32Array view — replaces Uint16Array + fp16 lookup
+		const src32 = new Float32Array(rawF32)
 
 		for (let ty = 0; ty < tileH; ty++) {
 			const canvasY = cy + ty
@@ -677,32 +696,37 @@ export function stitchTiles(
 				if (canvasX >= imageW) continue
 
 				const weight = _gaussianWindow512[tileRowBase + tx]
-				const srcBase = (tileRowBase + tx) * CHANNELS
+				const srcBase = (tileRowBase + tx) * CHANNELS // index into src32
 
-				// FIX 2: Lookup table replaces DataView — O(1) array read.
-				const fR = _fp16LookupTable[src16[srcBase]]
-				const fG = _fp16LookupTable[src16[srcBase + 1]]
-				const fB = _fp16LookupTable[src16[srcBase + 2]]
+				// FIX C: Denormalise from [-1,1] to [0,1]: (v + 1.0) * 0.5
+				// Clamp for numerical safety (Tanh is strictly < 1 but FP precision)
+				const rawR = src32[srcBase]
+				const rawG = src32[srcBase + 1]
+				const rawB = src32[srcBase + 2]
+
+				const fR =
+					rawR < -1.0 ? 0.0 : rawR > 1.0 ? 1.0 : (rawR + 1.0) * 0.5
+				const fG =
+					rawG < -1.0 ? 0.0 : rawG > 1.0 ? 1.0 : (rawG + 1.0) * 0.5
+				const fB =
+					rawB < -1.0 ? 0.0 : rawB > 1.0 ? 1.0 : (rawB + 1.0) * 0.5
 
 				const numBase = (canvasRowBase + canvasX) * CHANNELS
 				const denIdx = canvasRowBase + canvasX
 
-				_stitchNumerator[numBase] +=
-					fR < 0 ? 0 : fR > 1 ? 1 : fR * weight
-				_stitchNumerator[numBase + 1] +=
-					fG < 0 ? 0 : fG > 1 ? 1 : fG * weight
-				_stitchNumerator[numBase + 2] +=
-					fB < 0 ? 0 : fB > 1 ? 1 : fB * weight
+				_stitchNumerator[numBase] += fR * weight
+				_stitchNumerator[numBase + 1] += fG * weight
+				_stitchNumerator[numBase + 2] += fB * weight
 				_stitchDenominator[denIdx] += weight
 			}
 		}
 	}
 
-	// ── Pass 2: Normalise and clamp ───────────────────────────────────────────
+	// ── Pass 2: Normalise → output [0, 1] ────────────────────────────────────
 	const output = new Float32Array(totalPixels * CHANNELS)
 
 	for (let p = 0; p < totalPixels; p++) {
-		const invDen = 1.0 / _stitchDenominator[p] // denominator always > 0 (Gaussian floor)
+		const invDen = 1.0 / _stitchDenominator[p] // always > 1e-6 (Gaussian floor)
 		const srcBase = p * CHANNELS
 
 		let v = _stitchNumerator[srcBase] * invDen
@@ -719,27 +743,16 @@ export function stitchTiles(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 11 — ALPHA / LUMINANCE BLENDING  (FIX 3)
+// SECTION 12 — ALPHA / LUMINANCE BLENDING
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Blends original and stylized Float32 RGB tensors.
- * Writes into `out` if provided, otherwise writes into sharedBlendBuffer
- * (only valid for tensors ≤ 512×512×3 = 786,432 elements).
+ * Blends original and stylized Float32 [0,1] tensors.
  *
- * FIX 3: The original function always wrote into sharedBlendBuffer and threw
- * for any image > 512×512. RefineScreen calls this on the full-resolution
- * stitched output (e.g., 4032×3024 = ~36.6M elements) — completely broken.
- * Fix: Accept optional `out` parameter. Callers with large images supply
- * a caller-allocated Float32Array. Tile-size callers continue using the
- * shared buffer with no allocation.
+ * Both tensors must be in [0,1] (post-denormalization). Supplying raw model
+ * output in [-1,1] will produce incorrect blend results.
  *
- * @param original       - Original image Float32Array [H×W×3] in [0, 1].
- * @param stylized       - Stylized image Float32Array [H×W×3] in [0, 1].
- * @param luminanceBlend - 0.0 = fully original, 1.0 = fully stylized.
- * @param out            - Optional pre-allocated output buffer. If omitted,
- *                         uses sharedBlendBuffer (must fit: ≤ 786,432 elements).
- * @returns               Subarray of the output buffer containing blended values.
+ * Pass `out` for images > 512×512 (avoids sharedBlendBuffer overflow).
  */
 export function alphaBlend(
 	original: Float32Array,
@@ -749,26 +762,25 @@ export function alphaBlend(
 ): Float32Array {
 	if (original.length !== stylized.length) {
 		throw new Error(
-			`[tensorUtils] alphaBlend: length mismatch. ` +
+			`[tensorUtils] alphaBlend: length mismatch — ` +
 				`original=${original.length}, stylized=${stylized.length}.`
 		)
 	}
 
-	// Resolve output buffer: use caller-supplied, or fall back to shared buffer.
 	let outBuf: Float32Array
 	if (out !== undefined) {
 		if (out.length < original.length) {
 			throw new Error(
-				`[tensorUtils] alphaBlend: supplied out buffer (${out.length}) is smaller ` +
-					`than input tensors (${original.length}).`
+				`[tensorUtils] alphaBlend: supplied out buffer (${out.length}) ` +
+					`is smaller than input tensors (${original.length}).`
 			)
 		}
 		outBuf = out
 	} else {
 		if (original.length > sharedBlendBuffer.length) {
 			throw new Error(
-				`[tensorUtils] alphaBlend: tensors (${original.length} elements) exceed ` +
-					`sharedBlendBuffer (${sharedBlendBuffer.length} elements). ` +
+				`[tensorUtils] alphaBlend: tensors (${original.length} elements) ` +
+					`exceed sharedBlendBuffer (${sharedBlendBuffer.length} elements). ` +
 					`Supply a pre-allocated 'out' Float32Array for images > 512×512.`
 			)
 		}
@@ -789,14 +801,18 @@ export function alphaBlend(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 12 — FLOAT32 TENSOR → RGBA BYTE BUFFER
+// SECTION 13 — FLOAT32 TENSOR → RGBA BYTE BUFFER
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Converts a Float32Array in [0,1] to a Uint8Array of RGBA pixels.
+ * Input must be post-denormalized (call decodeModelOutput or stitchTiles first).
+ */
 export function f32ToPreviewRgba(f32: Float32Array): Uint8Array {
 	const totalPixels = (f32.length / CHANNELS) | 0
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS
-		const d = i * RGBA_CHANNELS
+		const s = i * CHANNELS,
+			d = i * RGBA_CHANNELS
 		sharedPreviewRgbaBuffer[d] = (f32[s] * 255) | 0
 		sharedPreviewRgbaBuffer[d + 1] = (f32[s + 1] * 255) | 0
 		sharedPreviewRgbaBuffer[d + 2] = (f32[s + 2] * 255) | 0
@@ -814,8 +830,8 @@ export function f32ToMainRgba(f32: Float32Array): Uint8Array {
 		)
 	}
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS
-		const d = i * RGBA_CHANNELS
+		const s = i * CHANNELS,
+			d = i * RGBA_CHANNELS
 		sharedMainRgbaBuffer[d] = (f32[s] * 255) | 0
 		sharedMainRgbaBuffer[d + 1] = (f32[s + 1] * 255) | 0
 		sharedMainRgbaBuffer[d + 2] = (f32[s + 2] * 255) | 0
@@ -825,8 +841,10 @@ export function f32ToMainRgba(f32: Float32Array): Uint8Array {
 }
 
 /**
- * Converts a stitched full-resolution Float32Array to a fresh RGBA Uint8Array.
- * This DOES allocate — call only from the background queue, never the camera loop.
+ * Converts a stitched full-resolution Float32Array [0,1] to a fresh RGBA Uint8Array.
+ * Allocates — call only from the background queue, never the camera loop.
+ *
+ * Input must be in [0, 1] (output of stitchTiles — already denormalized).
  */
 export function f32StitchedToRgba(
 	f32: Float32Array,
@@ -836,8 +854,8 @@ export function f32StitchedToRgba(
 	const totalPixels = imageW * imageH
 	const out = new Uint8Array(totalPixels * RGBA_CHANNELS)
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS
-		const d = i * RGBA_CHANNELS
+		const s = i * CHANNELS,
+			d = i * RGBA_CHANNELS
 		out[d] = (f32[s] * 255) | 0
 		out[d + 1] = (f32[s + 1] * 255) | 0
 		out[d + 2] = (f32[s + 2] * 255) | 0
@@ -847,35 +865,44 @@ export function f32StitchedToRgba(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 13 — BUFFER VALIDATION HELPERS
+// SECTION 14 — BUFFER VALIDATION HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Validates that a model output buffer has the expected byte size for float32 models.
+ * Expected: resolution² × 3 channels × 4 bytes (F32_BYTES).
+ */
 export function validateOutputBuffer(
 	buf: ArrayBuffer,
 	slot: 'preview' | 'main'
 ): void {
 	const res = slot === 'preview' ? PREVIEW_RES : INFERENCE_RES
-	const expected = res * res * CHANNELS * FP16_BYTES
+	const expected = res * res * CHANNELS * F32_BYTES // FIX A: was FP16_BYTES
 	if (buf.byteLength !== expected) {
 		throw new Error(
-			`[tensorUtils] validateOutputBuffer: slot="${slot}" expected ${expected}B, ` +
-				`got ${buf.byteLength}B.`
+			`[tensorUtils] validateOutputBuffer: slot="${slot}" ` +
+				`expected ${expected}B (float32), got ${buf.byteLength}B.`
 		)
 	}
 }
 
+/**
+ * Validates that a model input buffer has the expected byte size.
+ * Float32 model (isU8=false): resolution² × 3 × 4 bytes.
+ * INT8 model (isU8=true):     resolution² × 3 × 1 bytes.
+ */
 export function validateInputBuffer(
 	buf: ArrayBuffer,
 	slot: 'preview' | 'main',
 	isU8: boolean
 ): void {
 	const res = slot === 'preview' ? PREVIEW_RES : INFERENCE_RES
-	const bytesPerEl = isU8 ? 1 : FP16_BYTES
+	const bytesPerEl = isU8 ? 1 : F32_BYTES // FIX A: was FP16_BYTES for float path
 	const expected = res * res * CHANNELS * bytesPerEl
 	if (buf.byteLength !== expected) {
 		throw new Error(
-			`[tensorUtils] validateInputBuffer: slot="${slot}" isU8=${isU8} expected ` +
-				`${expected}B, got ${buf.byteLength}B.`
+			`[tensorUtils] validateInputBuffer: slot="${slot}" isU8=${isU8} ` +
+				`expected ${expected}B, got ${buf.byteLength}B.`
 		)
 	}
 }

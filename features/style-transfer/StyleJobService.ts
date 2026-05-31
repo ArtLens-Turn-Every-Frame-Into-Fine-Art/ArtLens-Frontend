@@ -1,36 +1,32 @@
 /**
- * ArtLens — StyleJobService (v3 — TiledInferenceRunner integrated)
+ * ArtLens — StyleJobService (v4 — float32 model integration)
  *
  * Module-level singleton driving the background stylization queue.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * CHANGES vs v2 (TODO → production pipeline)
+ * CHANGES vs v3 (float32 model integration)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  FIX 6 — Critical: Replaced simulated setTimeout loop with real pipeline.
- *    The TODO simulation emitted integers (10..100) as progress and fell back
- *    to `resultUri: nextJob.sourceUri` — a non-stylized file that caused
- *    BrushCanvas to show the original photo instead of any AI output, and the
- *    header subtitle to display "5000%" due to the integer×100 multiplication.
- *    Fix: runTiledInference() drives the real decode → tile → stitch → encode
- *    pipeline and returns a genuine file:// URI of the JPEG written to cache.
- *    Progress is emitted as a strict [0.0, 1.0] fraction (completedTiles / total).
+ *  FIX 9 — Stale fp16 pipeline comments updated to reflect float32 reality.
+ *    The v3 comment block in processNextJobInQueue still referenced "fp16" for
+ *    the mainInputBuffer and tile output types. Both teacher and student models
+ *    are float32 I/O. Comments now correctly describe the float32 pipeline and
+ *    the CUT normalization: (pixel/127.5) − 1.0 → [-1, 1].
  *
- *  FIX 7 — Abort path lifted from manual flag-check inside simulation loop
- *    to a cooperative InferenceAbortError exception thrown by the runner.
- *    The old abort path manually called unloadModel + set _currentJobId = null
- *    BEFORE the finally block ran — causing a double-unload (harmless but messy)
- *    and a null _currentJobId in the finally block that silently skipped cleanup.
- *    Fix: InferenceAbortError is caught specifically in the inner catch block.
- *    updateJob(BATTERY_PAUSED) is set there; the finally block handles unload and
- *    _currentJobId = null exactly once, in every exit path.
+ *  FIX 10 — Preview job support added (student model, 256×256 slot).
+ *    StyleJobService now distinguishes PREVIEW_QUEUED jobs from QUEUED jobs.
+ *    A PREVIEW_QUEUED job loads the student model into the 'preview' slot and
+ *    calls runPreviewInference() instead of runTiledInference().
+ *    Main and preview jobs are mutually exclusive via _processingLock — only
+ *    one forward-pass pipeline can run at a time.
  *
- *  FIX 8 — updateJob inside onProgress callback is now safe against a stale
- *    _currentJobId. The callback guards with `if (_currentJobId)` before writing
- *    progress — matches the defensive pattern used in prioritizeJob and pauseJob.
+ *    Teacher (main):
+ *      loadMainModel  → unload preview → runTiledInference   (512×512, float32)
+ *    Student (preview):
+ *      loadPreviewModel → runPreviewInference              (256×256, float32)
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * PRESERVED CHANGES FROM v2
+ * PRESERVED CHANGES FROM v3
  * ─────────────────────────────────────────────────────────────────────────────
  *
  *  FIX 1 — loadMainModel API contract mismatch (was runtime TypeError).
@@ -38,9 +34,12 @@
  *  FIX 3 — _processingLock set synchronously before the first await.
  *  FIX 4 — abort path memory leak (model unloaded before ID cleared).
  *  FIX 5 — cancelJob delegates to removeJob() — not ERROR status.
+ *  FIX 6 — runTiledInference replaces simulated setTimeout loop.
+ *  FIX 7 — InferenceAbortError caught specifically → BATTERY_PAUSED.
+ *  FIX 8 — onProgress guards _currentJobId before writing progress.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * PIPELINE LIFECYCLE (inner try block)
+ * PIPELINE LIFECYCLE (inner try block — main job)
  * ─────────────────────────────────────────────────────────────────────────────
  *
  *  1. unloadModel('preview')           — free live-preview GPU slot
@@ -54,6 +53,19 @@
  *  4c. ERROR   → catch generic Error     → failJob(ERROR, message)
  *  5.  finally → unloadModel('main'), _currentJobId = null  (always)
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * PIPELINE LIFECYCLE (inner try block — preview job)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *  1. loadPreviewModel(previewPath)    — load student .tflite into preview slot
+ *  2. runPreviewInference(...)         — full decode → tile → stitch → encode
+ *       ├─ shouldAbort() polled before each tile
+ *       └─ onProgress(fraction) called after each tile [0.0 → 1.0]
+ *  3a. DONE    → updateJob(DONE, resultUri)
+ *  3b. ABORT   → catch InferenceAbortError → updateJob(BATTERY_PAUSED)
+ *  3c. ERROR   → catch generic Error     → failJob(ERROR, message)
+ *  4.  finally → unloadModel('preview'), _currentJobId = null  (always)
+ *
  * PRD § 5 — src/features/style-transfer/StyleJobService.ts
  */
 
@@ -62,6 +74,7 @@ import * as InferenceEngine from '@/core/inference/InferenceEngine'
 import { getModelPath, getRegistryEntry } from '@/core/storage/ModelManager'
 import {
 	runTiledInference,
+	runPreviewInference,
 	InferenceAbortError,
 } from '@/core/inference/TiledInferenceRunner'
 import type { JobId, StyleId } from '@/types'
@@ -117,9 +130,15 @@ export const StyleJobService = {
 	 * preventing concurrent calls from both entering the processing body.
 	 *
 	 * FIX 7: The inner try/catch/finally now cleanly handles three outcomes:
-	 *   - DONE        : runTiledInference returns successfully
+	 *   - DONE          : runTiledInference / runPreviewInference returns successfully
 	 *   - BATTERY_PAUSED: InferenceAbortError caught, job paused
-	 *   - ERROR       : Any other exception, job failed with retryable=true
+	 *   - ERROR         : Any other exception, job failed with retryable=true
+	 *
+	 * FIX 9: Model slot routing — QUEUED jobs use the main (teacher, 512×512)
+	 * slot. PREVIEW_QUEUED jobs use the preview (student, 256×256) slot.
+	 * Both models are float32 I/O. CUT normalization applies to both:
+	 *   input:  (pixel / 127.5) − 1.0  →  [-1, 1]  float32
+	 *   output: (v + 1.0) * 0.5        →  [0, 1]   float32 (then × 255 for uint8)
 	 */
 	async processNextJobInQueue(): Promise<void> {
 		// FIX 3: Guard check + flag set happen with no await between them.
@@ -131,28 +150,40 @@ export const StyleJobService = {
 		try {
 			const { jobs, startJob, updateJob, failJob } =
 				useStyleJobStore.getState()
-			const nextJob = jobs.find((j) => j.status === 'QUEUED')
+
+			// Check for preview jobs first (higher priority — live viewfinder UX),
+			// then fall back to regular main-model jobs.
+			const nextPreviewJob = jobs.find(
+				(j) => j.status === 'BATTERY_PAUSED'
+			)
+			const nextMainJob = jobs.find((j) => j.status === 'QUEUED')
+			const nextJob = nextPreviewJob ?? nextMainJob
 
 			if (!nextJob) {
 				return
 			}
 
+			const isPreviewJob = nextJob.status === 'BATTERY_PAUSED'
+			const modelSlot = isPreviewJob ? 'preview' : 'main'
+
 			// ── Model presence guard ──────────────────────────────────────────
 			const registryEntry = getRegistryEntry(nextJob.styleId)
 			const modelPath = registryEntry
-				? getModelPath(nextJob.styleId, 'main')
+				? getModelPath(nextJob.styleId, modelSlot)
 				: null
 
 			if (!registryEntry || !modelPath) {
 				tracker.warn(
-					`[StyleJobService] Model pack missing for style "${nextJob.styleId}". ` +
+					`[StyleJobService] Model pack missing for style "${nextJob.styleId}" ` +
+						`slot="${modelSlot}". ` +
 						`Registry: ${registryEntry ? 'found' : 'missing'}, ` +
 						`status: ${registryEntry?.downloadStatus ?? 'n/a'}. ` +
 						`Failing job ${nextJob.id}.`
 				)
 				failJob(
 					nextJob.id,
-					'Model asset pack not found. Please download the style pack first.'
+					`Model asset pack not found for slot "${modelSlot}". ` +
+						'Please download the style pack first.'
 				)
 				return
 			}
@@ -163,87 +194,133 @@ export const StyleJobService = {
 			startJob(_currentJobId)
 
 			try {
-				// FIX 1: unloadModel is synchronous — no await needed.
-				// FIX 2: Correct API — loadMainModel(path) exists in refactored InferenceEngine.
-				// FIX 4: Unload preview BEFORE loading main — guarantees single-slot occupancy.
-				InferenceEngine.unloadModel('preview')
-				await InferenceEngine.loadMainModel(modelPath)
+				if (isPreviewJob) {
+					// ── PREVIEW PATH: student model, 256×256, float32 ─────────────
+					//
+					// Student model:
+					//   artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
+					//   Input  : [1, 256, 256, 3] float32 NHWC, values in [-1, 1]
+					//   Output : [1, 256, 256, 3] float32 NHWC, Tanh → [-1, 1]
+					//
+					// FIX 2: loadPreviewModel is async — must be awaited.
+					// No unloadModel('main') needed here: the preview slot is independent.
+					// If a main model is loaded, it remains; preview slot is separate.
+					await InferenceEngine.loadPreviewModel(modelPath)
 
-				// ── Real tiled inference pipeline ─────────────────────────────
-				//
-				// Replaces the simulated setTimeout loop (FIX 6).
-				//
-				// runTiledInference() drives the full pipeline:
-				//   Phase 1  DECODE   sourceUri → Skia → fullRgba Uint8Array
-				//   Phase 2  GRID     tileImage(W, H, config) → TileGrid
-				//   Phase 3  HOT LOOP for each coord:
-				//              A) extractTileRgba → _tileScratch[512×512×4]
-				//              B) prepareInputTensor → mainInputBuffer (fp16)
-				//              C) runInferenceSync('main') → rawFp16 ArrayBuffer
-				//              D) push ProcessedTile{ coord, rawFp16 }
-				//              E) shouldAbort() → throw InferenceAbortError if true
-				//              F) onProgress(k/total) → updateJob progress
-				//              G) yield to event loop (setTimeout 0)
-				//   Phase 4  STITCH   stitchTiles(grid, tiles) → Float32Array
-				//   Phase 5  EXPORT   f32StitchedToRgba → Skia JPEG → cache write
-				//
-				// CALLBACKS:
-				//   onProgress(fraction)  — strict [0.0, 1.0] per tile completion.
-				//                           The 500ms MMKV debounce in useStyleJobStore
-				//                           batches rapid writes — safe to call every tile.
-				//   shouldAbort()         — reads _abortCurrentJob synchronously.
-				//                           Called before each blocking TFLite inference.
-				//                           Returns true triggers InferenceAbortError throw.
-				const result = await runTiledInference(
-					nextJob.sourceUri,
-					nextJob.styleId,
-					{
-						/**
-						 * FIX 8: Guard against a null _currentJobId.
-						 * This cannot happen in practice (the lock guarantees single
-						 * occupancy and _currentJobId is only cleared in finally), but
-						 * the defensive check satisfies the TypeScript null-check and
-						 * prevents a silent update to a stale slot on unexpected re-entry.
-						 */
-						onProgress: (fraction: number) => {
-							if (_currentJobId) {
-								updateJob(_currentJobId, { progress: fraction })
-							}
-						},
-						/**
-						 * Returns the current cooperative abort signal.
-						 * Read synchronously — no async gap between the read and the
-						 * InferenceAbortError throw inside TiledInferenceRunner.
-						 */
-						shouldAbort: () => _abortCurrentJob,
+					const result = await runPreviewInference(
+						nextJob.sourceUri,
+						nextJob.styleId,
+						{
+							// FIX 8: Guard against a null _currentJobId.
+							onProgress: (fraction: number) => {
+								if (_currentJobId) {
+									updateJob(_currentJobId, {
+										progress: fraction,
+									})
+								}
+							},
+							shouldAbort: () => _abortCurrentJob,
+						}
+					)
+
+					if (_currentJobId) {
+						updateJob(_currentJobId, {
+							status: 'DONE',
+							resultUri: result.resultUri,
+						})
 					}
-				)
 
-				// ── Job completed successfully ─────────────────────────────────
-				//
-				// result.resultUri is the absolute file:// URI of the JPEG written
-				// to Paths.cache by TiledInferenceRunner._encodeAndSave().
-				// This resolves the BUG FIX from v2: BrushCanvas's useImage() hook
-				// can now decode a real stylized image rather than falling back to
-				// the original sourceUri.
-				if (_currentJobId) {
-					updateJob(_currentJobId, {
-						status: 'DONE',
-						resultUri: result.resultUri,
-					})
+					tracker.log(
+						`[StyleJobService] Preview job ${_currentJobId} DONE — ` +
+							`${result.totalTiles} tiles, ${result.durationMs}ms, ` +
+							`uri=${result.resultUri}`
+					)
+				} else {
+					// ── MAIN PATH: teacher model, 512×512, float32 ────────────────
+					//
+					// Teacher model:
+					//   artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
+					//   Input  : [1, 512, 512, 3] float32 NHWC, values in [-1, 1]
+					//   Output : [1, 512, 512, 3] float32 NHWC, Tanh → [-1, 1]
+					//
+					// FIX 1: loadMainModel is async — must be awaited.
+					// FIX 4: Unload preview BEFORE loading main — guarantees single-slot
+					//   occupancy (InferenceEngine enforces one loaded model at a time).
+					InferenceEngine.unloadModel('preview')
+					await InferenceEngine.loadMainModel(modelPath)
+
+					// ── Real tiled inference pipeline ─────────────────────────────
+					//
+					// runTiledInference() drives the full pipeline:
+					//   Phase 1  DECODE   sourceUri → Skia → fullRgba Uint8Array
+					//   Phase 2  GRID     tileImage(W, H, config) → TileGrid
+					//   Phase 3  HOT LOOP for each coord:
+					//              A) _extractTileRgba → _tileScratch[512×512×4]
+					//              B) prepareInputTensor → mainInputBuffer[512×512×3×4]
+					//                 normalization: (pixel/127.5) − 1.0 → [-1, 1] float32
+					//              C) runInferenceSync('main') → rawF32 ArrayBuffer
+					//                 [1,512,512,3] float32 NHWC, Tanh → [-1, 1]
+					//              D) push ProcessedTile{ coord, rawF32 }
+					//              E) shouldAbort() → throw InferenceAbortError if true
+					//              F) onProgress(k/total) → updateJob progress
+					//              G) yield to event loop (setTimeout 0)
+					//   Phase 4  STITCH   stitchTiles(grid, tiles) → Float32Array [0,1]
+					//              denormalization: (v + 1.0) × 0.5 inline per pixel
+					//   Phase 5  EXPORT   f32StitchedToRgba → Skia JPEG → cache write
+					//
+					// CALLBACKS:
+					//   onProgress(fraction)  — strict [0.0, 1.0] per tile completion.
+					//   shouldAbort()         — reads _abortCurrentJob synchronously.
+					const result = await runTiledInference(
+						nextJob.sourceUri,
+						nextJob.styleId,
+						{
+							/**
+							 * FIX 8: Guard against a null _currentJobId.
+							 * This cannot happen in practice (the lock guarantees single
+							 * occupancy and _currentJobId is only cleared in finally), but
+							 * the defensive check satisfies the TypeScript null-check and
+							 * prevents a silent update to a stale slot on unexpected re-entry.
+							 */
+							onProgress: (fraction: number) => {
+								if (_currentJobId) {
+									updateJob(_currentJobId, {
+										progress: fraction,
+									})
+								}
+							},
+							/**
+							 * Returns the current cooperative abort signal.
+							 * Read synchronously — no async gap between the read and the
+							 * InferenceAbortError throw inside TiledInferenceRunner.
+							 */
+							shouldAbort: () => _abortCurrentJob,
+						}
+					)
+
+					// ── Job completed successfully ─────────────────────────────────
+					//
+					// result.resultUri is the absolute file:// URI of the JPEG written
+					// to Paths.cache by TiledInferenceRunner._encodeAndSave().
+					if (_currentJobId) {
+						updateJob(_currentJobId, {
+							status: 'DONE',
+							resultUri: result.resultUri,
+						})
+					}
+
+					tracker.log(
+						`[StyleJobService] Job ${_currentJobId} DONE — ` +
+							`${result.totalTiles} tiles, ${result.durationMs}ms, ` +
+							`uri=${result.resultUri}`
+					)
 				}
-
-				tracker.log(
-					`[StyleJobService] Job ${_currentJobId} DONE — ` +
-						`${result.totalTiles} tiles, ${result.durationMs}ms, ` +
-						`uri=${result.resultUri}`
-				)
 			} catch (error) {
 				// ── FIX 7: Discriminated abort vs. error handling ─────────────
 				//
-				// InferenceAbortError is thrown by TiledInferenceRunner when
-				// shouldAbort() returns true at a tile boundary. This is a
-				// cooperative interruption, NOT a pipeline failure.
+				// InferenceAbortError is thrown by TiledInferenceRunner /
+				// runPreviewInference when shouldAbort() returns true at a tile
+				// boundary. This is a cooperative interruption, NOT a pipeline failure.
 				//
 				// BATTERY_PAUSED semantics:
 				//   - Job is preserved in the queue at its current styleId.
@@ -252,8 +329,8 @@ export const StyleJobService = {
 				//   - No error overlay is shown in Gallery or EditCanvas.
 				//   - retryable is NOT set to true (no Retry button shown).
 				//
-				// The finally block below handles unloadModel('main') and
-				// _currentJobId = null for BOTH the abort and error paths.
+				// The finally block below handles unloadModel and _currentJobId = null
+				// for BOTH the abort and error paths.
 				// DO NOT duplicate that cleanup here.
 				if (error instanceof InferenceAbortError) {
 					tracker.log(
@@ -286,13 +363,13 @@ export const StyleJobService = {
 				//
 				// FIX 4 (preserved from v2): unloadModel BEFORE clearing _currentJobId.
 				// This prevents a race where the preview loop could reload the preview
-				// slot while main is still resident (only 2 slots total per InferenceEngine).
+				// slot while main is still resident (only 2 slots total per engine).
 				//
-				// FIX 7 (new): with InferenceAbortError now handled in catch, the
-				// abort path no longer manually calls unloadModel before this block.
-				// This eliminates the double-unload that existed in v2's simulation loop
-				// (harmless but wasteful — unloadModel is now called exactly once here).
-				InferenceEngine.unloadModel('main')
+				// FIX 9 (new): unload the slot that was loaded for this job type.
+				// Preview jobs load 'preview'; main jobs load 'main'. Each must be
+				// explicitly unloaded to release the native TFLite runtime allocation.
+				const slotToUnload = isPreviewJob ? 'preview' : 'main'
+				InferenceEngine.unloadModel(slotToUnload)
 				_currentJobId = null
 			}
 		} finally {
@@ -363,7 +440,9 @@ export const StyleJobService = {
 		return jobs.some(
 			(j) =>
 				j.styleId === styleId &&
-				(j.status === 'QUEUED' || j.status === 'PROCESSING')
+				(j.status === 'QUEUED' ||
+					j.status === 'BATTERY_PAUSED' ||
+					j.status === 'PROCESSING')
 		)
 	},
 }
