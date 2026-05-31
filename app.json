@@ -14,13 +14,13 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.artlens.ArtLens",
+      "bundleIdentifier": "com.artlens.artlens",
       "infoPlist": {
         "NSCameraUsageDescription": "$(PRODUCT_NAME) needs access to your Camera."
       }
     },
     "android": {
-      "package": "com.artlens.ArtLens",
+      "package": "com.artlens.artlens",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -30,17 +30,15 @@
       "predictiveBackGestureEnabled": true,
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO",
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.WAKE_LOCK",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.WRITE_MEDIA_IMAGES",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
-        "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_AUDIO"
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
       ]
     },
     "plugins": [
@@ -70,14 +68,38 @@
             "enableShrinkResourcesInReleaseBuilds": true,
             "enableMinifyInReleaseBuilds": true,
             "enableProguardInReleaseBuilds": true,
+            "proguardRuleFiles": ["proguard-rules.pro"],
             "buildArchs": ["arm64-v8a"]
+          }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera",
+          "type": "image",
+          "mimeTypes": [
+            "image/heic",
+            "image/heif",
+            "image/jpeg",
+            "image/png",
+            "image/jpg"
+          ],
+          "colors": {
+            "cropToolbarColor": "#000000"
+          },
+          "dark": {
+            "colors": {
+              "cropToolbarColor": "#000000"
+            }
           }
         }
       ],
       [
         "react-native-fast-tflite",
         {
-          "enableAndroidGpuLibraries": true
+          "enableAndroidGpuLibraries": ["libOpenCL.so", "libGLES_mali.so"]
         }
       ],
       "expo-image",
