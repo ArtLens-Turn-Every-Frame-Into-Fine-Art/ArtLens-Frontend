@@ -4,7 +4,7 @@
  * FIX vs original:
  *  - `ModelManager.downloadStylePack()` / `ModelManager.deleteStylePack()` are
  *    named exports, not methods on a namespace object. Corrected to direct imports.
- *  - `model.previewModelUrl`, `model.mainModelUrl`, `model.configUrl` come from
+ *  - `model.previewModelUrl`, `model.mainModelUrl`, `model.config` come from
  *    the `StyleModel` type which must carry these fields (they are present in
  *    ModelManifestItem and persisted in MMKV via the registry). The catalog
  *    in useModelStore stores the full manifest item shape.
@@ -16,9 +16,9 @@
  *  - `useIncomingImage()` returns `{ pendingImage: PendingImage | null, clearPendingImage: () => void }`.
  *    The original code destructured `{ incomingUri, clearIncoming }` which
  *    don't exist. Fixed to use the actual hook contract.
- *  - `updateCatalog(result.updates)` — `ManifestUpdate` requires `configUrl`.
+ *  - `updateCatalog(result.updates)` — `ManifestUpdate` requires `config`.
  *    The API response updates are typed as `ManifestUpdate[]` which includes
- *    `configUrl`. We cast the result appropriately since the backend guarantees
+ *    `config`. We cast the result appropriately since the backend guarantees
  *    this field is present per Section 8.1 of the PRD.
  *  - Removed unused `formatBytes` helper and `handleApplyIncoming` (ESLint warnings).
  */
@@ -466,7 +466,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					previewModelUrl: model.previewModelUrl,
 					mainModelUrl: model.mainModelUrl,
 					isActive: true,
-					configUrl: model.configUrl ?? undefined,
+					config: model.config ?? undefined,
 				})
 
 				updateDownloadStatus(styleId, 'downloaded')

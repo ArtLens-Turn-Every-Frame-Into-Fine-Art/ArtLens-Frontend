@@ -46,7 +46,7 @@ export interface StyleModel {
 	/** URL to download the Main (full quality) .tflite model */
 	mainModelUrl: string
 	/** URL to a JSON file with per-model inference config (overlap, colour mode, etc.) */
-	configUrl: string
+	config: string
 	/** Local download state */
 	downloadStatus: DownloadStatus
 	/** Download progress [0, 1] — only meaningful when status === 'downloading' */
@@ -172,10 +172,10 @@ export interface HardwareProfile {
 export interface ModelUrls {
 	previewModelUrl: string
 	mainModelUrl: string
-	configUrl: string
+	config: string
 }
 
-/** Parsed contents of a style's config.json fetched from configUrl. */
+/** Parsed contents of a style's config.json fetched from config. */
 export interface ModelConfig {
 	/** Tile overlap fraction [0, 1]. Default 0.5 per PRD. */
 	tileOverlap: number
@@ -215,7 +215,7 @@ export interface ManifestUpdate {
 	isActive: boolean
 	previewModelUrl: string
 	mainModelUrl: string
-	configUrl?: string
+	config?: string
 }
 
 /** Full body of a successful POST /api/models-manifest 200 response. */

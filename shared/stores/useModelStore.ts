@@ -250,10 +250,10 @@ export const useModelStore = create<ModelStore>()(
 									...existing,
 									// Apply every server-side field from the delta.
 									...incoming,
-									// Ensure configUrl always has a string value.
-									configUrl:
-										incoming.configUrl ??
-										existing.configUrl ??
+									// Ensure config always has a string value.
+									config:
+										incoming.config ??
+										existing.config ??
 										'',
 									// Server says it is active again.
 									isActive: true,
@@ -283,7 +283,7 @@ export const useModelStore = create<ModelStore>()(
 									isActive: true,
 									previewModelUrl: incoming.previewModelUrl,
 									mainModelUrl: incoming.mainModelUrl,
-									configUrl: incoming.configUrl ?? '',
+									config: incoming.config ?? '',
 									// ── Local tracking fields (never from server) ──
 									downloadStatus: 'not_downloaded',
 									downloadProgress: 0, // EXPLICIT — guaranteed initialization

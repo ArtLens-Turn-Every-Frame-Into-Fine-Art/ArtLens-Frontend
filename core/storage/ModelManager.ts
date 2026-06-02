@@ -353,7 +353,7 @@ export async function downloadStyleAssets(item: ManifestUpdate): Promise<void> {
 	// Per-stream progress values, mutated by each stream's onProgress callback.
 	let progressPreview = 0.0
 	let progressMain = 0.0
-	let progressConfig = item.configUrl ? 0.0 : 1.0 // Skip if no config URL.
+	let progressConfig = item.config ? 0.0 : 1.0 // Skip if no config URL.
 
 	/** Recomputes and dispatches the aggregate fraction. */
 	const _reportAggregate = (flush = false): void => {
@@ -420,7 +420,7 @@ export async function downloadStyleAssets(item: ManifestUpdate): Promise<void> {
 			return downloaded
 		})()
 
-		const downloadConfig: Promise<File | null> = item.configUrl
+		const downloadConfig: Promise<File | null> = item.config
 			? (async (): Promise<File> => {
 					progressConfig = 0.1
 					_reportAggregate()
@@ -429,7 +429,7 @@ export async function downloadStyleAssets(item: ManifestUpdate): Promise<void> {
 						`${styleDir.uri}${styleDir.uri.endsWith('/') ? '' : '/'}config.json`
 					)
 					const downloaded = await File.downloadFileAsync(
-						item.configUrl!,
+						item.config!,
 						configFile
 					)
 
