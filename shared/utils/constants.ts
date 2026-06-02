@@ -19,6 +19,8 @@ export const APP_INFO = {
 	awardBadge: 'Awwwards Mobile Excellence 2026',
 	supportEmail: 'support@artlens-ai.dev',
 	twitterUrl: 'https://x.com/artlens_app',
+	album: 'ArtLens',
+	success_reset_ms: 4000,
 } as const
 
 // ─────────────────────────────────────────────────────────────────────────────

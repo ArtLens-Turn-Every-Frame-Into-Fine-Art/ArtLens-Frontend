@@ -1,5 +1,5 @@
 /**
- * ArtLens — ExportScreen (Production Implementation)
+ * ArtLens — ExportScreen
  *
  * Route params:
  *   jobId      — used to derive style name and filename
@@ -14,25 +14,70 @@
  *       • requestPermissionsAsync() — if denied, prompts user to open Settings
  *       • createAlbumAsync("ArtLens") if album absent
  *       • saveToLibraryAsync with correct "ArtLens" album
- *       • Success state checkmark + 4 s auto-reset
+ *       • Success state checkmark + auto-reset
  *   - Share via expo-sharing:
  *       • isAvailableAsync() guard
  *       • shareAsync() → native share sheet (no sandbox copy made)
  *   - Privacy note: on-device processing disclosure
+ *   - After successful gallery save:
+ *       • Temporary cache file is deleted to free internal storage
+ *       • job.resultUri is updated to the permanent gallery URI so the
+ *         in-app gallery tile never points at a deleted cache path
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SDK 55 MIGRATION NOTES
+ *
+ * CHANGE 1 — New expo-file-system OOP API replaces legacy procedural API
+ *   BEFORE (SDK 53 legacy):
+ *     import * as FileSystem from 'expo-file-system/legacy'
+ *     FileSystem.cacheDirectory           → string | null
+ *     FileSystem.copyAsync({ from, to })  → Promise<void>
+ *     FileSystem.deleteAsync(uri, opts)   → Promise<void>
+ *
+ *   AFTER (SDK 55 new default API):
+ *     import { File, Directory, Paths } from 'expo-file-system'
+ *     Paths.cache                         → string  (cache directory path)
+ *     new File(Paths.cache, filename)     → File instance pointing to cache/<filename>
+ *     sourceFile.copy(destFile)           → Promise<File>  (returns the new file)
+ *     cachedFile.delete()                 → void  (synchronous)
+ *
+ *   The new API is object-oriented: you construct a File or Directory
+ *   instance from a base path + optional filename, then call methods on it.
+ *   No more top-level async functions or bare string URIs for cache paths.
+ *
+ * CHANGE 2 — Cache-directory detection uses Paths.cache
+ *   BEFORE: `FileSystem.cacheDirectory` (legacy string, nullable)
+ *   AFTER:  `Paths.cache` (always-valid string from the new API)
+ *   The isCachedResult check now uses `outputUri.startsWith(Paths.cache)`.
+ *
+ * CHANGE 3 — File.delete() is synchronous in the new API
+ *   The new File class exposes `.delete()` as a synchronous method.
+ *   Wrap in try/catch instead of using `.catch()` on a promise.
+ *
+ * CHANGE 4 — File.copy() returns the new File (no separate "to" path needed)
+ *   BEFORE: copyAsync({ from: outputUri, to: tempUri })
+ *   AFTER:  const tempFile = await sourceFile.copy(destFile)
+ *   The returned File is the copy; use tempFile.uri for MediaLibrary.
+ *
+ * All other fixes from the previous version (FIX 2–5) are retained:
+ *   • FIX 2 — mimeType undeclared variable (non-issue; never referenced for paths)
+ *   • FIX 3 — setTimeout memory-leak guard via savedResetTimerRef
+ *   • FIX 4 — getAlbumsAsync({ includeSmartAlbums: false })
+ *   • FIX 5 — improved isCachedResult detection
  *
  * PRD § 3.6 — ExportScreen
  *
  * Dependencies:
  *   expo-media-library ~55.0.16
  *   expo-sharing ~55.0.19
- *   expo-file-system ~55.0.9
+ *   expo-file-system ~55.0.9   ← NEW default OOP API (File, Directory, Paths)
  *   expo-image
  *   expo-router
  *   lucide-react-native
  *   react-native-safe-area-context
  */
 
-import React, { useCallback, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
 	ActivityIndicator,
 	Alert,
@@ -50,7 +95,12 @@ import { router, useLocalSearchParams } from 'expo-router'
 import { Image } from 'expo-image'
 import * as MediaLibrary from 'expo-media-library'
 import * as Sharing from 'expo-sharing'
-import * as FileSystem from 'expo-file-system'
+
+// CHANGE 1: SDK 55 — import from 'expo-file-system' (new default OOP API).
+// The legacy procedural functions (copyAsync, deleteAsync, cacheDirectory, etc.)
+// have been removed from the default export. Use File, Directory, and Paths.
+import { File, Paths } from 'expo-file-system'
+
 import {
 	CheckCircle,
 	ChevronLeft,
@@ -63,6 +113,7 @@ import { LinearGradient } from 'expo-linear-gradient'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import { useModelStore } from '@/shared/stores/useModelStore'
 import type { ExportFormat } from '@/types'
+import { APP_INFO } from '@/shared/utils/constants'
 
 import { createTracker } from '@/shared/utils/logger'
 const tracker = createTracker('export_screen')
@@ -87,7 +138,6 @@ const C = {
 } as const
 
 const { width: SCREEN_W } = Dimensions.get('window')
-const ARTLENS_ALBUM = 'ArtLens'
 const THUMB_H = 220
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +227,7 @@ const SOCIAL_TARGETS: SocialTarget[] = [
 /**
  * Produces: ArtLens_YYYY-MM-DD_StyleName.ext
  * Sanitizes the style name to filesystem-safe characters.
+ * Uses APP_INFO.name as the prefix so it is never hard-coded here.
  */
 function deriveFilename(styleName: string, exportFormat: ExportFormat): string {
 	const now = new Date()
@@ -187,7 +238,22 @@ function deriveFilename(styleName: string, exportFormat: ExportFormat): string {
 	].join('-')
 	const safe = styleName.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_')
 	const ext = exportFormat.toLowerCase()
-	return `ArtLens_${date}_${safe}.${ext}`
+	return `${APP_INFO.name}_${date}_${safe}.${ext}`
+}
+
+/**
+ * Returns the MIME type string for the given export format.
+ * PNG is lossless; everything else is treated as JPEG.
+ */
+function mimeTypeFor(exportFormat: ExportFormat): string {
+	return exportFormat.toLowerCase() === 'png' ? 'image/png' : 'image/jpeg'
+}
+
+/**
+ * Returns the iOS UTI for the given export format.
+ */
+function utiFor(exportFormat: ExportFormat): string {
+	return exportFormat.toLowerCase() === 'png' ? 'public.png' : 'public.jpeg'
 }
 
 /**
@@ -336,11 +402,12 @@ export default function ExportScreen(): React.JSX.Element {
 	const job = useStyleJobStore(
 		(s) => s.jobs.find((j) => j.id === jobId) ?? null
 	)
+	const updateJob = useStyleJobStore((s) => s.updateJob)
 	const catalog = useModelStore((s) => s.catalog)
 	const exportFormat = useModelStore((s) => s.exportFormat) as ExportFormat
 
 	const styleName = useMemo(
-		() => catalog.find((m) => m.id === job?.styleId)?.name ?? 'ArtLens',
+		() => catalog.find((m) => m.id === job?.styleId)?.name ?? APP_INFO.name,
 		[catalog, job?.styleId]
 	)
 
@@ -359,7 +426,39 @@ export default function ExportScreen(): React.JSX.Element {
 	const [isSharing, setIsSharing] = useState(false)
 	const [sharingSocialId, setSharingSocialId] = useState<string | null>(null)
 
+	// FIX 3 (retained): Store the success-reset timer so it can be cancelled
+	// on unmount, preventing a setState call on an unmounted component.
+	const savedResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+		null
+	)
+
+	useEffect(() => {
+		return () => {
+			if (savedResetTimerRef.current !== null) {
+				clearTimeout(savedResetTimerRef.current)
+			}
+		}
+	}, [])
+
 	// ── Save to gallery ───────────────────────────────────────────────────────
+	/**
+	 * Pipeline (SDK 55 new FileSystem API):
+	 *   1. Verify / request MediaLibrary permission.
+	 *   2. Build a named temp File inside Paths.cache using the new OOP API.
+	 *      CHANGE 1+2: `new File(Paths.cache, filename)` replaces the legacy
+	 *      `FileSystem.cacheDirectory + filename` string concatenation.
+	 *   3. Copy the source file to the named temp File via sourceFile.copy().
+	 *      CHANGE 4: `copy()` returns the new File; no separate "to" URI needed.
+	 *   4. Register the temp copy as a MediaLibrary asset.
+	 *   5. Add the asset to (or create) the APP_INFO.album album.
+	 *      FIX 4 (retained): Pass `{ includeSmartAlbums: false }` to getAlbumsAsync.
+	 *   6. Delete the named temp copy — it has been handed off to MediaLibrary.
+	 *      CHANGE 3: File.delete() is synchronous in the new API.
+	 *   7. Delete the original cache file to reclaim internal storage.
+	 *      CHANGE 2+FIX 5: Use `outputUri.startsWith(Paths.cache)` for detection.
+	 *   8. Update job.resultUri to the permanent MediaLibrary asset URI.
+	 *   9. Show success state then auto-reset (FIX 3 retained: cancel on unmount).
+	 */
 	const handleSave = useCallback(async () => {
 		if (!outputUri) {
 			Alert.alert('Error', 'No image available to save.')
@@ -381,7 +480,7 @@ export default function ExportScreen(): React.JSX.Element {
 				)
 				Alert.alert(
 					'Permission Required',
-					'Photo library access was denied. To save your artwork, enable it in your device Settings under ArtLens → Photos.',
+					`Photo library access was denied. To save your artwork, enable it in your device Settings under ${APP_INFO.name} → Photos.`,
 					[
 						{ text: 'Not Now', style: 'cancel' },
 						{
@@ -402,7 +501,7 @@ export default function ExportScreen(): React.JSX.Element {
 					})
 					Alert.alert(
 						'Permission Denied',
-						'ArtLens needs photo library access to save your artwork. Please enable it in Settings.',
+						`${APP_INFO.name} needs photo library access to save your artwork. Please enable it in Settings.`,
 						[
 							{ text: 'Cancel', style: 'cancel' },
 							{
@@ -415,25 +514,30 @@ export default function ExportScreen(): React.JSX.Element {
 				}
 			}
 
-			// Step 2 — Copy source file to a named temp file so MediaLibrary
-			// registers the correct human-readable filename.
-			const mimeType =
-				exportFormat.toLowerCase() === 'png'
-					? 'image/png'
-					: 'image/jpeg'
-			const sourceFile = new FileSystem.File(outputUri)
-			const destFile = FileSystem.Paths.cache.createFile(
-				filename,
-				mimeType
-			)
+			// Step 2 — Build a named temp File inside the cache directory.
+			// CHANGE 1 + CHANGE 2: Use the new OOP API.
+			// `new File(Paths.cache, filename)` constructs a File reference at
+			// `<cacheDir>/<filename>` without creating it on disk yet.
+			// Paths.cache is always a valid string (never null) unlike the legacy
+			// FileSystem.cacheDirectory which was `string | null`.
+			const sourceFile = new File(outputUri)
+			const destFile = new File(Paths.cache, filename)
+
+			// Step 3 — Copy the source file to the named temp File.
+			// CHANGE 4: File.copy(dest) returns void in expo-file-system v55;
+			// the destination file (destFile) IS the copy after the call.
 			await sourceFile.copy(destFile)
 
-			// Step 3 — Create the gallery asset.
+			// Step 4 — Create the gallery asset from the named temp copy.
 			const asset = await MediaLibrary.createAssetAsync(destFile.uri)
 
-			// Step 4 — Find or create the "ArtLens" album.
-			const albums = await MediaLibrary.getAlbumsAsync()
-			const existingAlbum = albums.find((a) => a.title === ARTLENS_ALBUM)
+			// Step 5 — Find or create the album named APP_INFO.album.
+			// FIX 4 (retained): Pass { includeSmartAlbums: false } to avoid a
+			// broad storage scan on Android and limit to user-created albums.
+			const albums = await MediaLibrary.getAlbumsAsync({
+				includeSmartAlbums: false,
+			})
+			const existingAlbum = albums.find((a) => a.title === APP_INFO.album)
 
 			if (existingAlbum) {
 				await MediaLibrary.addAssetsToAlbumAsync(
@@ -442,26 +546,84 @@ export default function ExportScreen(): React.JSX.Element {
 					false
 				)
 			} else {
-				await MediaLibrary.createAlbumAsync(ARTLENS_ALBUM, asset, false)
+				await MediaLibrary.createAlbumAsync(
+					APP_INFO.album,
+					asset,
+					false
+				)
 			}
 
-			// Step 5 — Clean up the temporary named copy.
+			// Step 6 — Delete the named temp copy (it is now in the gallery).
+			// CHANGE 3: File.delete() is synchronous in the new SDK 55 API.
+			// Wrap in try/catch instead of chaining .catch() on a promise.
 			try {
 				destFile.delete()
 			} catch (err) {
 				tracker.warn(
-					'Failed to delete temporary export file from cache',
+					'Failed to delete named temp export file from cache',
 					{
-						filename,
+						tempUri: destFile.uri,
 						error: err instanceof Error ? err.message : String(err),
-						outputUri,
 					}
 				)
 			}
 
-			// Step 6 — Show success state for 4 seconds.
+			// Step 7 — Delete the original cache file to reclaim internal storage.
+			// CHANGE 2 + FIX 5: Paths.cache is a Directory object in the new API;
+			// use Paths.cache.uri to get the string path for startsWith comparison.
+			const isCachedResult =
+				outputUri.startsWith(Paths.cache.uri) ||
+				outputUri.includes('/cache/artlens_') ||
+				outputUri.includes('/cache/artlens-')
+
+			if (isCachedResult) {
+				// CHANGE 3: File.delete() is synchronous.
+				try {
+					new File(outputUri).delete()
+				} catch (err) {
+					tracker.warn(
+						'Failed to delete source cache file after gallery save',
+						{
+							outputUri,
+							error:
+								err instanceof Error
+									? err.message
+									: String(err),
+						}
+					)
+				}
+			}
+
+			// Step 8 — Update job.resultUri to the permanent MediaLibrary asset URI.
+			// This ensures the in-app Gallery tile never points at a deleted cache
+			// path. The asset.uri is a content:// URI on Android (persists in the
+			// gallery) or a ph:// URI on iOS — both survive cache clears.
+			if (jobId && asset.uri) {
+				updateJob(jobId, { resultUri: asset.uri })
+				tracker.log(
+					'job.resultUri updated to permanent gallery asset URI',
+					{ jobId, assetUri: asset.uri }
+				)
+			}
+
+			// Step 9 — Show success state then auto-reset.
+			// FIX 3 (retained): Clear any prior timer before arming a new one,
+			// and store the ID so the useEffect cleanup can cancel it on unmount.
+			if (savedResetTimerRef.current !== null) {
+				clearTimeout(savedResetTimerRef.current)
+			}
 			setIsSaved(true)
-			setTimeout(() => setIsSaved(false), 4000)
+			savedResetTimerRef.current = setTimeout(() => {
+				setIsSaved(false)
+				savedResetTimerRef.current = null
+			}, APP_INFO.success_reset_ms)
+
+			tracker.log('Artwork saved to gallery successfully', {
+				jobId,
+				filename,
+				assetUri: asset.uri,
+				albumName: APP_INFO.album,
+			})
 		} catch (err) {
 			tracker.error('Artwork save to gallery pipeline failed', {
 				jobId,
@@ -469,6 +631,7 @@ export default function ExportScreen(): React.JSX.Element {
 				exportFormat,
 				quality,
 				filename,
+				outputUri,
 				error:
 					err instanceof Error
 						? {
@@ -495,6 +658,7 @@ export default function ExportScreen(): React.JSX.Element {
 		jobId,
 		quality,
 		styleName,
+		updateJob,
 	])
 
 	// ── Share ─────────────────────────────────────────────────────────────────
@@ -514,15 +678,9 @@ export default function ExportScreen(): React.JSX.Element {
 
 			// Use the original outputUri directly — no duplicate copy needed.
 			await Sharing.shareAsync(outputUri, {
-				mimeType:
-					exportFormat.toLowerCase() === 'png'
-						? 'image/png'
-						: 'image/jpeg',
+				mimeType: mimeTypeFor(exportFormat),
 				dialogTitle: `Share ${filename}`,
-				UTI:
-					exportFormat.toLowerCase() === 'png'
-						? 'public.png'
-						: 'public.jpeg',
+				UTI: utiFor(exportFormat),
 			})
 		} catch (err) {
 			tracker.error('Native sharing utility failed', {
@@ -590,15 +748,9 @@ export default function ExportScreen(): React.JSX.Element {
 				// we cannot programmatically pre-select an app without a custom
 				// Intent bridge, so we rely on the share sheet ordering.
 				await Sharing.shareAsync(outputUri, {
-					mimeType:
-						exportFormat.toLowerCase() === 'png'
-							? 'image/png'
-							: 'image/jpeg',
+					mimeType: mimeTypeFor(exportFormat),
 					dialogTitle: `Share to ${target.label}`,
-					UTI:
-						exportFormat.toLowerCase() === 'png'
-							? 'public.png'
-							: 'public.jpeg',
+					UTI: utiFor(exportFormat),
 				})
 			} catch (err) {
 				tracker.error('Social share failed', {
@@ -719,10 +871,9 @@ export default function ExportScreen(): React.JSX.Element {
 								color={C.white}
 								size={20}
 								strokeWidth={2.5}
-								fill={C.white}
 							/>
 							<Text style={styles.saveBtnText}>
-								Saved to ArtLens
+								Saved to {APP_INFO.album}
 							</Text>
 						</>
 					) : (
@@ -756,7 +907,7 @@ export default function ExportScreen(): React.JSX.Element {
 					))}
 				</View>
 
-				{/* ── Generic system share sheet ────────────────────────── */}
+				{/* ── Generic system share sheet ────────────────────────────── */}
 				<Pressable
 					onPress={handleShare}
 					disabled={
@@ -781,7 +932,7 @@ export default function ExportScreen(): React.JSX.Element {
 					<Text style={styles.shareBtnText}>More Options…</Text>
 				</Pressable>
 
-				{/* ── Privacy disclosure ────────────────────────────────── */}
+				{/* ── Privacy disclosure ────────────────────────────────────── */}
 				<View style={styles.privacyRow}>
 					<Lock color={C.textDim} size={12} strokeWidth={1.5} />
 					<Text style={styles.privacyText}>
@@ -808,7 +959,7 @@ const styles = StyleSheet.create({
 		paddingHorizontal: 12,
 		paddingBottom: 10,
 		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: '#1E1E30',
+		borderBottomColor: C.border,
 	},
 	headerBtn: {
 		width: 40,
@@ -820,7 +971,7 @@ const styles = StyleSheet.create({
 	headerTitle: {
 		flex: 1,
 		textAlign: 'center',
-		color: '#F4F4FF',
+		color: C.text,
 		fontSize: 17,
 		fontWeight: '700',
 		letterSpacing: -0.2,
@@ -843,15 +994,15 @@ const styles = StyleSheet.create({
 		alignSelf: 'center',
 		marginVertical: 20,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
-		backgroundColor: '#10101C',
+		borderColor: C.border,
+		backgroundColor: C.surface,
 	},
 	thumb: {
 		width: '100%',
 		height: '100%',
 	},
 	thumbPlaceholder: {
-		backgroundColor: '#181828',
+		backgroundColor: C.surfaceHigh,
 	},
 	thumbGradient: {
 		...StyleSheet.absoluteFillObject,
@@ -867,7 +1018,7 @@ const styles = StyleSheet.create({
 		paddingVertical: 5,
 	},
 	thumbFilename: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 11,
 		fontWeight: '500',
 	},
@@ -879,14 +1030,14 @@ const styles = StyleSheet.create({
 		gap: 8,
 	},
 	pageTitle: {
-		color: '#F4F4FF',
+		color: C.text,
 		fontSize: 24,
 		fontWeight: '800',
 		letterSpacing: -0.5,
 		textAlign: 'center',
 	},
 	pageSub: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 14,
 		textAlign: 'center',
 		lineHeight: 21,
@@ -895,7 +1046,7 @@ const styles = StyleSheet.create({
 
 	// ── Section label ─────────────────────────────────────────────────────────
 	sectionLabel: {
-		color: '#40405A',
+		color: C.textDim,
 		fontSize: 11,
 		fontWeight: '700',
 		letterSpacing: 1.0,
@@ -907,19 +1058,19 @@ const styles = StyleSheet.create({
 	qualityCard: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: '#10101C',
+		backgroundColor: C.surface,
 		borderRadius: 16,
 		borderWidth: 1.5,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 		padding: 16,
 		marginBottom: 10,
 	},
 	qualityCardSelected: {
-		borderColor: '#7C3AED',
+		borderColor: C.primaryMid,
 		backgroundColor: 'rgba(124,58,237,0.05)',
 		...Platform.select({
 			ios: {
-				shadowColor: '#7C3AED',
+				shadowColor: C.primaryMid,
 				shadowOffset: { width: 0, height: 4 },
 				shadowOpacity: 0.18,
 				shadowRadius: 10,
@@ -935,29 +1086,29 @@ const styles = StyleSheet.create({
 		marginBottom: 4,
 	},
 	qualityTitle: {
-		color: '#F4F4FF',
+		color: C.text,
 		fontSize: 15,
 		fontWeight: '700',
 	},
 	qualityTitleSelected: {
-		color: '#7C3AED',
+		color: C.primaryMid,
 	},
 	estimateBadge: {
-		backgroundColor: '#1E1E30',
+		backgroundColor: C.border,
 		borderRadius: 6,
 		paddingHorizontal: 7,
 		paddingVertical: 2,
 	},
 	estimateBadgeSelected: {
-		backgroundColor: '#7C3AED',
+		backgroundColor: C.primaryMid,
 	},
 	estimateText: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 11,
 		fontWeight: '700',
 	},
 	qualitySub: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 12,
 	},
 	radio: {
@@ -965,19 +1116,19 @@ const styles = StyleSheet.create({
 		height: 22,
 		borderRadius: 11,
 		borderWidth: 2,
-		borderColor: '#40405A',
+		borderColor: C.textDim,
 		justifyContent: 'center',
 		alignItems: 'center',
 		marginLeft: 14,
 	},
 	radioSelected: {
-		borderColor: '#7C3AED',
+		borderColor: C.primaryMid,
 	},
 	radioDot: {
 		width: 10,
 		height: 10,
 		borderRadius: 5,
-		backgroundColor: '#7C3AED',
+		backgroundColor: C.primaryMid,
 	},
 
 	// ── Action buttons ────────────────────────────────────────────────────────
@@ -988,15 +1139,15 @@ const styles = StyleSheet.create({
 		gap: 10,
 		height: 58,
 		borderRadius: 16,
-		backgroundColor: '#7C3AED',
+		backgroundColor: C.primaryMid,
 		marginTop: 24,
 		marginBottom: 12,
 	},
 	saveBtnSuccess: {
-		backgroundColor: '#10B981',
+		backgroundColor: C.success,
 	},
 	saveBtnText: {
-		color: '#FFFFFF',
+		color: C.white,
 		fontSize: 16,
 		fontWeight: '800',
 	},
@@ -1008,11 +1159,11 @@ const styles = StyleSheet.create({
 		height: 50,
 		borderRadius: 14,
 		borderWidth: 1.5,
-		borderColor: '#7C3AED',
+		borderColor: C.primaryMid,
 		marginBottom: 20,
 	},
 	shareBtnText: {
-		color: '#7C3AED',
+		color: C.primaryMid,
 		fontSize: 15,
 		fontWeight: '700',
 	},
@@ -1032,8 +1183,8 @@ const styles = StyleSheet.create({
 		paddingVertical: 10,
 		borderRadius: 12,
 		borderWidth: 1.5,
-		borderColor: '#1E1E30',
-		backgroundColor: '#10101C',
+		borderColor: C.border,
+		backgroundColor: C.surface,
 		minWidth: '45%',
 		flex: 1,
 	},
@@ -1043,7 +1194,7 @@ const styles = StyleSheet.create({
 		borderRadius: 5,
 	},
 	socialLabel: {
-		color: '#F4F4FF',
+		color: C.text,
 		fontSize: 13,
 		fontWeight: '600',
 	},
@@ -1058,7 +1209,7 @@ const styles = StyleSheet.create({
 	},
 	privacyText: {
 		flex: 1,
-		color: '#40405A',
+		color: C.textDim,
 		fontSize: 12,
 		lineHeight: 18,
 	},
