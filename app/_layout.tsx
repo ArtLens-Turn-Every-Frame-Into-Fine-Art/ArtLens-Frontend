@@ -1,5 +1,5 @@
 /**
- * ArtLens — Root Layout Shell
+ * ArtLens — Root Layout Shell (Light Theme Variant)
  *
  * Responsibilities:
  *  - GestureHandlerRootView + StatusBar
@@ -24,15 +24,15 @@ import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('RootLayout')
 
-// — Design Tokens ——————————————————————————————————————————————————————————————
+// — Design Tokens (Updated to Light Theme) ————————————————————————————————————
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryGlow: '#7C3AED',
-	inactive: '#52526A',
-	white: '#F4F4FF',
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	border: '#F2F2F7',
+	primary: '#7B61FF',
+	primaryGlow: '#A291FF',
+	inactive: '#8E8E93',
+	white: '#FFFFFF',
 } as const
 
 const TAB_BAR_HEIGHT = Platform.OS === 'ios' ? 82 : 105
@@ -120,7 +120,7 @@ export default function RootLayout(): React.JSX.Element | null {
 		<ContactProvider>
 			<GestureHandlerRootView style={styles.root} onLayout={onRootLayout}>
 				<StatusBar
-					style="light"
+					style="dark"
 					translucent
 					backgroundColor="transparent"
 				/>
@@ -129,7 +129,7 @@ export default function RootLayout(): React.JSX.Element | null {
 					screenOptions={{
 						sceneStyle: { backgroundColor: C.bg },
 						headerShown: false,
-						tabBarActiveTintColor: C.primaryGlow,
+						tabBarActiveTintColor: C.primary, // Swapped to primary core for richer text visibility
 						tabBarInactiveTintColor: C.inactive,
 						tabBarStyle: VISIBLE_TAB_BAR_STYLE,
 						tabBarLabelStyle: styles.tabLabel,
@@ -161,7 +161,7 @@ export default function RootLayout(): React.JSX.Element | null {
 						options={{
 							title: 'Create',
 							tabBarIcon: CreateIcon,
-							tabBarLabel: () => null, // label suppressed; icon carries the weight
+							tabBarLabel: () => null,
 							tabBarStyle: { display: 'none' },
 						}}
 					/>
@@ -229,15 +229,14 @@ const styles = StyleSheet.create({
 		borderColor: C.border,
 		justifyContent: 'center',
 		alignItems: 'center',
-		// Lift it slightly above the tab bar line
 		marginTop: Platform.OS === 'ios' ? -16 : -12,
 	},
 	createPillActive: {
-		backgroundColor: C.primaryGlow,
-		borderColor: C.primaryGlow,
-		shadowColor: C.primaryGlow,
+		backgroundColor: C.primary,
+		borderColor: C.primary,
+		shadowColor: C.primary,
 		shadowOffset: { width: 0, height: 4 },
-		shadowOpacity: 0.45,
+		shadowOpacity: 0.25,
 		shadowRadius: 12,
 		elevation: 8,
 	},

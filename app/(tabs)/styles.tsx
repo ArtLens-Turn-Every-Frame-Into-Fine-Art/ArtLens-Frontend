@@ -38,19 +38,22 @@ import {
 	StatusBar,
 	StyleSheet,
 	Text,
+	TextInput,
 	TouchableOpacity,
 	View,
 	type ListRenderItem,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
-import { LinearGradient } from 'expo-linear-gradient'
 import {
 	Check,
 	ChevronLeft,
 	Download,
+	Eye,
 	HardDrive,
+	HelpCircle,
 	Info,
+	Search,
 	Sparkles,
 	Trash2,
 	X,
@@ -70,40 +73,22 @@ import {
 import type { StyleModel } from '@/types'
 
 import { createTracker } from '@/shared/utils/logger'
+import { COLORS } from '@/shared/utils/constants'
 
 // Initialize namespaced module logger at module scope
 const tracker = createTracker('StylesScreen')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DESIGN TOKENS
+// CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	downloaded: '#10B981',
-	warning: '#D97706',
-	error: '#DC2626',
-	white: '#FFFFFF',
-	accent: '#7C3AED',
-	accentGradient: ['#7C3AED', '#6D28D9'],
-	textPrimary: '#F4F4FF',
-	success: '#10B981',
-} as const
-
 const { width: SCREEN_W } = Dimensions.get('window')
-const H_PADDING = 16
+const H_PADDING = 20
 const COLUMN_GAP = 10
 const COLUMNS = 2
 const CARD_W = (SCREEN_W - H_PADDING * 2 - COLUMN_GAP * (COLUMNS - 1)) / COLUMNS
-const CARD_H = CARD_W * 1.35
+
+const CATEGORIES = ['All', 'Popular', 'New', 'Downloaded']
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOWNLOAD PROGRESS RING
@@ -115,13 +100,47 @@ interface ProgressRingProps {
 
 const ProgressRing = React.memo<ProgressRingProps>(({ progress }) => (
 	<View style={styles.progressRingWrap}>
-		<ActivityIndicator color={C.primaryMid} size="small" />
+		<ActivityIndicator color={COLORS.primary} size="small" />
 		<Text style={styles.progressPercent}>
 			{Math.round(progress * 100)}%
 		</Text>
 	</View>
 ))
 ProgressRing.displayName = 'ProgressRing'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INFO ITEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface InfoItemProps {
+	icon: React.ReactNode
+	label: string
+}
+
+const InfoItem = React.memo<InfoItemProps>(({ icon, label }) => (
+	<View style={styles.infoItem}>
+		{icon}
+		<Text style={styles.infoText}>{label}</Text>
+	</View>
+))
+InfoItem.displayName = 'InfoItem'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FAQ ITEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface FaqItemProps {
+	question: string
+	answer: string
+}
+
+const FaqItem = React.memo<FaqItemProps>(({ question, answer }) => (
+	<View style={styles.faqItem}>
+		<Text style={styles.faqQuestion}>{question}</Text>
+		<Text style={styles.faqAnswer}>{answer}</Text>
+	</View>
+))
+FaqItem.displayName = 'FaqItem'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLE GRID CARD
@@ -150,44 +169,50 @@ const StyleGridCard = React.memo<StyleCardProps>(
 
 		return (
 			<TouchableOpacity
-				activeOpacity={0.85}
+				activeOpacity={0.9}
 				onPress={handlePress}
-				style={[styles.card, isSelected && styles.cardSelected]}
+				style={[
+					styles.styleCard,
+					isSelected && styles.styleCardSelected,
+				]}
 				accessibilityRole="button"
 				accessibilityLabel={`${item.name} style, ${item.downloadStatus}`}
 			>
-				<Image
-					source={{ uri: item.thumbnailUrl }}
-					style={styles.cardImage}
-					contentFit="cover"
-					cachePolicy="disk"
-					transition={250}
-				/>
-				<LinearGradient
-					colors={['transparent', 'rgba(10, 10, 18, 0.95)']}
-					style={StyleSheet.absoluteFill}
-					start={{ x: 0, y: 0.3 }}
-					end={{ x: 0, y: 1 }}
-				/>
+				{/* Thumbnail */}
+				{item.thumbnailUrl ? (
+					<Image
+						source={{ uri: item.thumbnailUrl }}
+						style={styles.styleImage}
+						contentFit="cover"
+						cachePolicy="disk"
+						transition={250}
+					/>
+				) : (
+					<View style={[styles.styleImage, styles.comingSoonBg]}>
+						<Text style={styles.comingSoonText}>COMING SOON</Text>
+					</View>
+				)}
 
-				{/* Top Status Indicators */}
-				<View style={styles.cardBadgeContainer}>
+				{/* Download status badge — top-right */}
+				<View style={styles.cardBadge}>
 					{isDownloaded ? (
-						<View
-							style={[styles.statusBadge, styles.badgeDownloaded]}
-						>
-							<Zap color={C.success} size={10} fill={C.success} />
+						<View style={styles.badgeDownloaded}>
+							<Zap
+								color={COLORS.success}
+								size={10}
+								fill={COLORS.success}
+							/>
 						</View>
 					) : isDownloading ? (
 						<ProgressRing progress={item.downloadProgress ?? 0} />
 					) : (
 						<TouchableOpacity
-							style={[styles.statusBadge, styles.badgeCloud]}
+							style={styles.badgeCloud}
 							onPress={handleDownload}
 							hitSlop={12}
 						>
 							<Download
-								color={C.textPrimary}
+								color="#FFF"
 								size={11}
 								strokeWidth={2.5}
 							/>
@@ -195,12 +220,10 @@ const StyleGridCard = React.memo<StyleCardProps>(
 					)}
 				</View>
 
-				{/* Title Content */}
-				<View style={styles.cardContent}>
-					<Text style={styles.cardName} numberOfLines={1}>
-						{item.name}
-					</Text>
-					<Text style={styles.cardSize}>{item.fileSize}</Text>
+				{/* Card footer */}
+				<View style={styles.cardInfo}>
+					<Text style={styles.styleName}>{item.name}</Text>
+					<Text style={styles.styleGenre}>{item.fileSize}</Text>
 				</View>
 			</TouchableOpacity>
 		)
@@ -244,7 +267,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 						accessibilityRole="button"
 						accessibilityLabel="Close"
 					>
-						<X color={C.textMuted} size={20} strokeWidth={2} />
+						<X color={COLORS.textGray} size={20} strokeWidth={2} />
 					</Pressable>
 
 					<ScrollView
@@ -258,12 +281,6 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 								contentFit="cover"
 								cachePolicy="disk"
 							/>
-							<LinearGradient
-								colors={['transparent', C.surface]}
-								style={StyleSheet.absoluteFill}
-								start={{ x: 0, y: 0.5 }}
-								end={{ x: 0, y: 1 }}
-							/>
 						</View>
 
 						<View style={styles.sheetContent}>
@@ -275,7 +292,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 							<View style={styles.sheetMeta}>
 								<View style={styles.sheetMetaItem}>
 									<HardDrive
-										color={C.textMuted}
+										color={COLORS.textGray}
 										size={14}
 										strokeWidth={1.5}
 									/>
@@ -285,7 +302,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 								</View>
 								<View style={styles.sheetMetaItem}>
 									<Info
-										color={C.textMuted}
+										color={COLORS.textGray}
 										size={14}
 										strokeWidth={1.5}
 									/>
@@ -299,7 +316,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 								<View style={styles.sheetActions}>
 									<View style={styles.sheetDownloadedRow}>
 										<Check
-											color={C.downloaded}
+											color={COLORS.success}
 											size={18}
 											strokeWidth={2.5}
 										/>
@@ -316,7 +333,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 										accessibilityLabel={`Delete ${item.name}`}
 									>
 										<Trash2
-											color={C.error}
+											color="#DC2626"
 											size={16}
 											strokeWidth={1.8}
 										/>
@@ -328,7 +345,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 							) : isDownloading ? (
 								<View style={styles.sheetDownloadingRow}>
 									<ActivityIndicator
-										color={C.primaryMid}
+										color={COLORS.primary}
 										size="small"
 									/>
 									<Text style={styles.sheetDownloadingText}>
@@ -347,7 +364,7 @@ const ModelDetailSheet = React.memo<DetailSheetProps>(
 									accessibilityLabel={`Download ${item.name}`}
 								>
 									<Download
-										color={C.white}
+										color="#FFF"
 										size={18}
 										strokeWidth={2}
 									/>
@@ -375,7 +392,6 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 	const router = useRouter()
 	const insets = useSafeAreaInsets()
 
-	// Route configuration checks
 	const { sourceUri } = useLocalSearchParams<{ sourceUri?: string }>()
 
 	const catalog = useModelStore((s) => s.catalog)
@@ -387,11 +403,36 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 
 	const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null)
 	const [refreshing, setRefreshing] = useState(false)
+	const [searchQuery, setSearchQuery] = useState('')
+	const [activeCategory, setActiveCategory] = useState('All')
+	const [detailItem, setDetailItem] = useState<StyleModel | null>(null)
+	const [detailVisible, setDetailVisible] = useState(false)
 
 	const activeStyles = useMemo(
 		() => catalog.filter((m) => m.isActive),
 		[catalog]
 	)
+
+	// Category-aware filter: map download status to old category labels
+	const filteredStyles = useMemo(() => {
+		return activeStyles.filter((style) => {
+			const matchesSearch = style.name
+				.toLowerCase()
+				.includes(searchQuery.toLowerCase())
+
+			let matchesCategory = true
+			if (activeCategory === 'Downloaded') {
+				matchesCategory = style.downloadStatus === 'downloaded'
+			} else if (activeCategory === 'New') {
+				matchesCategory = !style.isActive // adapt as needed to your data model
+			} else if (activeCategory === 'Popular') {
+				matchesCategory = true // adapt to your data model popularity flag
+			}
+
+			return matchesSearch && matchesCategory
+		})
+	}, [activeStyles, searchQuery, activeCategory])
+
 	const selectedStyle = useMemo(
 		() => catalog.find((m) => m.id === selectedStyleId),
 		[catalog, selectedStyleId]
@@ -451,7 +492,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					downloadStatus: 'downloading',
 					previewPath: null,
 					mainPath: null,
-					configPath: null,
+					config: { mainModel: 0, previewModel: 0 },
 					previewSize: 0,
 					mainSize: 0,
 				})
@@ -491,7 +532,34 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 
 	const handleSelectStyle = useCallback((item: StyleModel) => {
 		setSelectedStyleId(item.id)
+		setDetailItem(item)
+		setDetailVisible(true)
 	}, [])
+
+	const handleCloseDetail = useCallback(() => {
+		setDetailVisible(false)
+	}, [])
+
+	const handleDelete = useCallback(
+		(styleId: string) => {
+			Alert.alert(
+				'Remove Style',
+				'This will delete the downloaded model files from your device.',
+				[
+					{ text: 'Cancel', style: 'cancel' },
+					{
+						text: 'Remove',
+						style: 'destructive',
+						onPress: () => {
+							updateDownloadStatus(styleId, 'not_downloaded')
+							setDetailVisible(false)
+						},
+					},
+				]
+			)
+		},
+		[updateDownloadStatus]
+	)
 
 	// Commit selected style configurations into active background engine pipelines
 	const handleApplyStyle = useCallback(() => {
@@ -518,7 +586,6 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 			styleId: selectedStyle.id,
 		})
 
-		// Route back immediately to main Gallery dashboard
 		router.replace('/(tabs)/gallery')
 	}, [sourceUri, selectedStyle, enqueueJob, router])
 
@@ -537,114 +604,188 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 	const keyExtractor = useCallback((item: StyleModel) => item.id, [])
 
 	return (
-		<View style={styles.screen}>
-			<StatusBar barStyle="light-content" />
+		<View style={styles.container}>
+			<StatusBar barStyle="dark-content" />
 
-			{/* Header Navigation Bar Layout */}
-			<View style={[styles.header, { paddingTop: insets.top + 12 }]}>
+			{/* Header */}
+			<View
+				style={[
+					styles.header,
+					{ paddingTop: insets.top > 0 ? insets.top : 16 },
+				]}
+			>
 				<TouchableOpacity
 					style={styles.backButton}
 					onPress={() => router.back()}
 					hitSlop={12}
 				>
-					<ChevronLeft color={C.textPrimary} size={24} />
+					<ChevronLeft color={COLORS.textMain} size={24} />
 				</TouchableOpacity>
-				<View style={styles.headerTitleContainer}>
-					<Text style={styles.headerTitle}>Select Style</Text>
-					<Text style={styles.headerSubtitle}>
-						Choose neural canvas mapping
-					</Text>
-				</View>
+				<Text style={styles.headerTitle}>Style Explorer</Text>
 				<View style={styles.headerRightPlaceholder} />
 			</View>
 
-			{/* Main Grid View */}
-			<FlatList
-				data={activeStyles}
-				renderItem={renderCard}
-				keyExtractor={keyExtractor}
-				numColumns={2}
-				columnWrapperStyle={styles.gridRow}
-				contentContainerStyle={[
-					styles.gridContainer,
-					{ paddingBottom: insets.bottom + 110 },
-				]}
+			<ScrollView
 				showsVerticalScrollIndicator={false}
+				contentContainerStyle={[
+					styles.scrollContent,
+					{ paddingBottom: insets.bottom + 100 },
+				]}
 				refreshControl={
 					<RefreshControl
 						refreshing={refreshing}
 						onRefresh={handleRefresh}
-						tintColor={C.accent}
-						colors={[C.accent]}
+						tintColor={COLORS.primary}
+						colors={[COLORS.primary]}
 					/>
 				}
-				ListEmptyComponent={
-					<View style={styles.emptyContainer}>
-						<Sparkles color={C.textDim} size={40} />
-						<Text style={styles.emptyText}>
-							No transformation layers found
-						</Text>
-						<Text style={styles.emptySubtext}>
-							Pull down to load catalog entries from cloud node
-							architectures
-						</Text>
-					</View>
-				}
-			/>
-
-			{/* Interactive Process Pipeline Action Control Strip */}
-			<View
-				style={[
-					styles.actionBar,
-					{ paddingBottom: Math.max(insets.bottom, 16) + 8 },
-				]}
 			>
-				<View style={styles.actionBarDetails}>
-					{selectedStyle ? (
-						<>
+				<Text style={styles.pageTitle}>Choose Your Style</Text>
+				<Text style={styles.pageSubtitle}>
+					Transform your photos into masterpieces using AI-powered
+					artist profiles.
+				</Text>
+
+				{/* Info Box */}
+				<View style={styles.infoBox}>
+					<InfoItem
+						icon={<Sparkles size={16} color={COLORS.primary} />}
+						label="AI Curated"
+					/>
+					<InfoItem
+						icon={<Eye size={16} color={COLORS.primary} />}
+						label="Live Preview"
+					/>
+					<InfoItem
+						icon={<Download size={16} color={COLORS.primary} />}
+						label="Offline Use"
+					/>
+				</View>
+
+				{/* Search Bar */}
+				<View style={styles.searchContainer}>
+					<Search size={20} color={COLORS.textGray} />
+					<TextInput
+						placeholder="Search styles..."
+						style={styles.searchInput}
+						value={searchQuery}
+						onChangeText={setSearchQuery}
+						placeholderTextColor={COLORS.textGray}
+					/>
+				</View>
+
+				{/* Category Pills */}
+				<ScrollView
+					horizontal
+					showsHorizontalScrollIndicator={false}
+					style={styles.categoryScroll}
+				>
+					{CATEGORIES.map((cat) => (
+						<TouchableOpacity
+							key={cat}
+							onPress={() => setActiveCategory(cat)}
+							style={[
+								styles.pill,
+								activeCategory === cat && styles.activePill,
+							]}
+						>
 							<Text
-								style={styles.actionStyleName}
-								numberOfLines={1}
+								style={[
+									styles.pillText,
+									activeCategory === cat &&
+										styles.activePillText,
+								]}
 							>
-								{selectedStyle.name}
+								{cat}
 							</Text>
-							<Text style={styles.actionStyleStatus}>
-								{selectedStyle.downloadStatus === 'downloaded'
-									? 'Ready to process'
-									: 'Requires local download'}
-							</Text>
-						</>
+						</TouchableOpacity>
+					))}
+				</ScrollView>
+
+				{/* Styles Grid */}
+				<View style={styles.grid}>
+					{filteredStyles.length > 0 ? (
+						filteredStyles.map((style) => (
+							<StyleGridCard
+								key={style.id}
+								item={style}
+								isSelected={selectedStyleId === style.id}
+								onSelect={handleSelectStyle}
+								onDownload={handleDownload}
+							/>
+						))
 					) : (
-						<Text style={styles.actionPlaceholder}>
-							Choose a target style frame
-						</Text>
+						<View style={styles.emptyState}>
+							<Sparkles color={COLORS.textGray} size={36} />
+							<Text style={styles.emptyStateText}>
+								{searchQuery
+									? `No styles found matching "${searchQuery}"`
+									: 'No styles available. Pull down to sync.'}
+							</Text>
+						</View>
 					)}
 				</View>
 
-				<TouchableOpacity
-					activeOpacity={0.8}
-					disabled={
-						!selectedStyle ||
-						selectedStyle.downloadStatus !== 'downloaded'
-					}
-					onPress={handleApplyStyle}
+				{/* FAQ Section */}
+				<View style={styles.faqSection}>
+					<View style={styles.faqHeaderRow}>
+						<HelpCircle size={22} color={COLORS.textMain} />
+						<Text style={styles.faqHeader}>Help &amp; Tips</Text>
+					</View>
+					<FaqItem
+						question="How do I download a new style?"
+						answer="Tap on any style. If it's not in your library, the download will begin automatically."
+					/>
+					<FaqItem
+						question="Can I combine styles?"
+						answer="Currently, ArtLens applies one primary style per image for the best resolution results."
+					/>
+				</View>
+			</ScrollView>
+
+			{/* Action Bar — shown when a style is selected and sourceUri is present */}
+			{sourceUri && selectedStyle && (
+				<View
 					style={[
-						styles.applyButton,
-						(!selectedStyle ||
-							selectedStyle.downloadStatus !== 'downloaded') &&
-							styles.applyButtonDisabled,
+						styles.actionBar,
+						{ paddingBottom: Math.max(insets.bottom, 16) + 8 },
 					]}
 				>
-					<Sparkles
-						color={C.textPrimary}
-						size={16}
-						fill={C.textPrimary}
-					/>
-					<Text style={styles.applyButtonText}>
-						Apply Fine-Art Style
-					</Text>
-				</TouchableOpacity>
-			</View>
+					<View style={styles.actionBarDetails}>
+						<Text style={styles.actionStyleName} numberOfLines={1}>
+							{selectedStyle.name}
+						</Text>
+						<Text style={styles.actionStyleStatus}>
+							{selectedStyle.downloadStatus === 'downloaded'
+								? 'Ready to process'
+								: 'Requires local download'}
+						</Text>
+					</View>
+
+					<TouchableOpacity
+						activeOpacity={0.8}
+						disabled={selectedStyle.downloadStatus !== 'downloaded'}
+						onPress={handleApplyStyle}
+						style={[
+							styles.applyButton,
+							selectedStyle.downloadStatus !== 'downloaded' &&
+								styles.applyButtonDisabled,
+						]}
+					>
+						<Sparkles color="#FFF" size={16} fill="#FFF" />
+						<Text style={styles.applyButtonText}>Apply Style</Text>
+					</TouchableOpacity>
+				</View>
+			)}
+
+			{/* Model Detail Sheet */}
+			<ModelDetailSheet
+				item={detailItem}
+				visible={detailVisible}
+				onClose={handleCloseDetail}
+				onDownload={handleDownload}
+				onDelete={handleDelete}
+			/>
 		</View>
 	)
 }
@@ -654,132 +795,258 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-	screen: { flex: 1 },
+	container: { flex: 1, backgroundColor: '#FFFFFF' },
 
-	pageHeader: {
+	// ── Header ─────────────────────────────────────────────────────────────────
+	header: {
 		flexDirection: 'row',
-		justifyContent: 'space-between',
 		alignItems: 'center',
+		justifyContent: 'space-between',
 		paddingHorizontal: H_PADDING,
 		paddingBottom: 12,
+		borderBottomWidth: 1,
+		borderBottomColor: COLORS.border,
+		backgroundColor: '#FFFFFF',
 	},
-	pageHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+	backButton: {
+		width: 40,
+		height: 40,
+		borderRadius: 20,
+		backgroundColor: COLORS.border,
+		alignItems: 'center',
+		justifyContent: 'center',
+	},
+	headerTitle: { fontSize: 17, fontWeight: '700', color: COLORS.textMain },
+	headerRightPlaceholder: { width: 40 },
+
+	// ── Scroll ─────────────────────────────────────────────────────────────────
+	scrollContent: { padding: H_PADDING, paddingBottom: 40 },
+
+	// ── Page intro ─────────────────────────────────────────────────────────────
 	pageTitle: {
-		color: C.text,
-		fontSize: 26,
+		fontSize: 32,
 		fontWeight: '800',
+		color: COLORS.textMain,
+		marginBottom: 8,
 		letterSpacing: -0.5,
 	},
-	pageSubtitle: { color: C.textMuted, fontSize: 13, fontWeight: '500' },
+	pageSubtitle: {
+		fontSize: 16,
+		color: COLORS.textGray,
+		marginBottom: 24,
+		lineHeight: 22,
+	},
 
-	incomingBanner: {
+	// ── Info Box ───────────────────────────────────────────────────────────────
+	infoBox: {
+		flexDirection: 'row',
+		backgroundColor: '#F8F3FF',
+		borderRadius: 16,
+		padding: 16,
+		marginBottom: 24,
+		justifyContent: 'space-around',
+	},
+	infoItem: { alignItems: 'center', gap: 6 },
+	infoText: { fontSize: 11, fontWeight: '600', color: COLORS.primary },
+
+	// ── Search ─────────────────────────────────────────────────────────────────
+	searchContainer: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		marginHorizontal: H_PADDING,
-		marginBottom: 16,
-		backgroundColor: C.surfaceHigh,
-		borderRadius: 14,
+		backgroundColor: COLORS.border,
+		borderRadius: 12,
+		paddingHorizontal: 12,
+		height: 48,
+		marginBottom: 20,
+	},
+	searchInput: {
+		flex: 1,
+		fontSize: 16,
+		marginLeft: 8,
+		color: COLORS.textMain,
+	},
+
+	// ── Category Pills ─────────────────────────────────────────────────────────
+	categoryScroll: { marginBottom: 24 },
+	pill: {
+		paddingHorizontal: 18,
+		paddingVertical: 10,
+		borderRadius: 25,
+		backgroundColor: COLORS.border,
+		marginRight: 10,
+	},
+	activePill: { backgroundColor: COLORS.primary },
+	pillText: { fontSize: 14, color: COLORS.textGray, fontWeight: '600' },
+	activePillText: { color: '#FFF' },
+
+	// ── Grid ───────────────────────────────────────────────────────────────────
+	grid: {
+		flexDirection: 'row',
+		flexWrap: 'wrap',
+		justifyContent: 'space-between',
+	},
+	styleCard: {
+		width: CARD_W,
+		backgroundColor: '#FFF',
+		borderRadius: 16,
+		marginBottom: 20,
 		borderWidth: 1,
-		borderColor: `${C.primaryMid}40`,
-		padding: 10,
+		borderColor: COLORS.border,
+		...Platform.select({
+			ios: {
+				shadowColor: '#000',
+				shadowOffset: { width: 0, height: 4 },
+				shadowOpacity: 0.1,
+				shadowRadius: 8,
+			},
+			android: { elevation: 4 },
+		}),
+	},
+	styleCardSelected: {
+		borderColor: COLORS.primary,
+		borderWidth: 2,
+	},
+	styleImage: {
+		width: '100%',
+		height: CARD_W,
+		borderTopLeftRadius: 16,
+		borderTopRightRadius: 16,
+	},
+	comingSoonBg: {
+		backgroundColor: COLORS.textMain,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	comingSoonText: {
+		color: '#FFF',
+		fontWeight: '900',
+		fontSize: 12,
+		letterSpacing: 1,
+	},
+	cardBadge: {
+		position: 'absolute',
+		top: 8,
+		right: 8,
+	},
+	badgeDownloaded: {
+		width: 22,
+		height: 22,
+		borderRadius: 11,
+		backgroundColor: `${COLORS.success}30`,
+		borderWidth: 1,
+		borderColor: `${COLORS.success}60`,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	badgeCloud: {
+		width: 26,
+		height: 26,
+		borderRadius: 13,
+		backgroundColor: 'rgba(0,0,0,0.55)',
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	cardInfo: { padding: 12 },
+	styleName: { fontSize: 16, fontWeight: '700', color: COLORS.textMain },
+	styleGenre: { fontSize: 12, color: COLORS.textGray, marginTop: 2 },
+
+	// ── Progress ring ──────────────────────────────────────────────────────────
+	progressRingWrap: { alignItems: 'center', gap: 2 },
+	progressPercent: {
+		color: COLORS.textMain,
+		fontSize: 9,
+		fontWeight: '700',
+	},
+
+	// ── Empty state ────────────────────────────────────────────────────────────
+	emptyState: {
+		width: '100%',
+		paddingVertical: 40,
+		alignItems: 'center',
 		gap: 12,
 	},
-	incomingThumb: { width: 44, height: 44, borderRadius: 8 },
-	incomingText: { flex: 1 },
-	incomingTitle: { color: C.text, fontSize: 14, fontWeight: '600' },
-	incomingSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-	incomingClose: { padding: 4 },
-
-	sectionLabel: {
-		color: C.textMuted,
-		fontSize: 12,
-		fontWeight: '600',
-		letterSpacing: 0.8,
-		textTransform: 'uppercase',
-		marginHorizontal: H_PADDING,
-		marginBottom: 12,
+	emptyStateText: {
+		color: COLORS.textGray,
+		fontSize: 16,
+		textAlign: 'center',
 	},
 
-	listContent: { paddingHorizontal: H_PADDING },
-	columnWrapper: { gap: COLUMN_GAP, marginBottom: COLUMN_GAP },
-
-	gridCard: {
-		width: CARD_W,
-		height: CARD_H,
-		borderRadius: 16,
-		overflow: 'hidden',
-		backgroundColor: C.surface,
-		borderWidth: 1,
-		borderColor: C.border,
+	// ── FAQ ────────────────────────────────────────────────────────────────────
+	faqSection: {
+		marginTop: 20,
+		paddingTop: 30,
+		borderTopWidth: 1,
+		borderTopColor: COLORS.border,
 	},
-	gridCardPressed: { opacity: 0.88, transform: [{ scale: 0.97 }] },
-	gridCardImage: { ...StyleSheet.absoluteFillObject },
-	gridCardBadge: { position: 'absolute', top: 10, right: 10 },
-	downloadedBadge: {
-		width: 22,
-		height: 22,
-		borderRadius: 11,
-		backgroundColor: `${C.downloaded}20`,
-		borderWidth: 1,
-		borderColor: `${C.downloaded}50`,
-		justifyContent: 'center',
+	faqHeaderRow: {
+		flexDirection: 'row',
 		alignItems: 'center',
+		gap: 8,
+		marginBottom: 20,
 	},
-	notDownloadedBadge: {
-		width: 22,
-		height: 22,
-		borderRadius: 11,
-		backgroundColor: 'rgba(0,0,0,0.5)',
-		borderWidth: 1,
-		borderColor: 'rgba(255,255,255,0.15)',
-		justifyContent: 'center',
-		alignItems: 'center',
+	faqHeader: { fontSize: 20, fontWeight: '800', color: COLORS.textMain },
+	faqItem: { marginBottom: 24 },
+	faqQuestion: {
+		fontSize: 16,
+		fontWeight: '700',
+		color: COLORS.textMain,
+		marginBottom: 6,
 	},
-	progressRingWrap: { alignItems: 'center', gap: 2 },
-	progressPercent: { color: C.text, fontSize: 9, fontWeight: '700' },
-	gridCardInfo: {
+	faqAnswer: { fontSize: 14, color: COLORS.textGray, lineHeight: 20 },
+
+	// ── Action Bar ─────────────────────────────────────────────────────────────
+	actionBar: {
 		position: 'absolute',
 		bottom: 0,
 		left: 0,
 		right: 0,
-		padding: 10,
-	},
-	gridCardName: { color: C.text, fontSize: 13, fontWeight: '700' },
-	gridCardSize: { color: C.textMuted, fontSize: 11, marginTop: 2 },
-	downloadOverlay: {
-		position: 'absolute',
-		bottom: 10,
-		right: 10,
-		width: 36,
-		height: 36,
-		borderRadius: 18,
-		backgroundColor: `${C.primaryMid}CC`,
-		justifyContent: 'center',
+		backgroundColor: '#FFF',
+		borderTopWidth: StyleSheet.hairlineWidth,
+		borderColor: COLORS.border,
+		flexDirection: 'row',
 		alignItems: 'center',
-	},
-
-	emptyState: {
-		alignItems: 'center',
-		paddingTop: 60,
+		paddingHorizontal: 16,
+		paddingTop: 14,
 		gap: 12,
-		paddingHorizontal: 32,
+		...Platform.select({
+			ios: {
+				shadowColor: '#000',
+				shadowOffset: { width: 0, height: -4 },
+				shadowOpacity: 0.06,
+				shadowRadius: 8,
+			},
+			android: { elevation: 8 },
+		}),
 	},
-	emptyTitle: {
-		color: C.text,
-		fontSize: 18,
+	actionBarDetails: { flex: 1, justifyContent: 'center' },
+	actionStyleName: {
+		color: COLORS.textMain,
+		fontSize: 15,
 		fontWeight: '700',
-		textAlign: 'center',
 	},
-	emptySub: {
-		color: C.textMuted,
-		fontSize: 14,
-		textAlign: 'center',
-		lineHeight: 20,
+	actionStyleStatus: {
+		color: COLORS.textGray,
+		fontSize: 11,
+		marginTop: 2,
 	},
+	applyButton: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		justifyContent: 'center',
+		backgroundColor: COLORS.primary,
+		borderRadius: 12,
+		paddingVertical: 13,
+		paddingHorizontal: 16,
+		gap: 6,
+		minWidth: 140,
+	},
+	applyButtonDisabled: { opacity: 0.4 },
+	applyButtonText: { color: '#FFF', fontSize: 14, fontWeight: '700' },
 
+	// ── Model Detail Sheet ─────────────────────────────────────────────────────
 	sheet: {
 		flex: 1,
-		backgroundColor: C.surface,
+		backgroundColor: '#FFFFFF',
 		borderTopLeftRadius: 24,
 		borderTopRightRadius: 24,
 		paddingTop: 8,
@@ -788,7 +1055,7 @@ const styles = StyleSheet.create({
 		width: 40,
 		height: 4,
 		borderRadius: 2,
-		backgroundColor: C.border,
+		backgroundColor: COLORS.border,
 		alignSelf: 'center',
 		marginBottom: 16,
 	},
@@ -799,7 +1066,7 @@ const styles = StyleSheet.create({
 		width: 36,
 		height: 36,
 		borderRadius: 18,
-		backgroundColor: C.surfaceHigh,
+		backgroundColor: COLORS.border,
 		justifyContent: 'center',
 		alignItems: 'center',
 		zIndex: 10,
@@ -809,28 +1076,28 @@ const styles = StyleSheet.create({
 	sheetHeroImage: { width: '100%', height: '100%' },
 	sheetContent: { padding: 24, gap: 12 },
 	sheetTitle: {
-		color: C.text,
+		color: COLORS.textMain,
 		fontSize: 26,
 		fontWeight: '800',
 		letterSpacing: -0.5,
 	},
-	sheetDescription: { color: C.textMuted, fontSize: 15, lineHeight: 22 },
+	sheetDescription: { color: COLORS.textGray, fontSize: 15, lineHeight: 22 },
 	sheetMeta: { flexDirection: 'row', gap: 20, marginVertical: 4 },
 	sheetMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-	sheetMetaText: { color: C.textMuted, fontSize: 13, fontWeight: '500' },
+	sheetMetaText: { color: COLORS.textGray, fontSize: 13, fontWeight: '500' },
 	sheetActions: { gap: 12, marginTop: 8 },
 	sheetDownloadedRow: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		gap: 8,
-		backgroundColor: `${C.downloaded}15`,
+		backgroundColor: `${COLORS.success}15`,
 		borderRadius: 12,
 		padding: 14,
 		borderWidth: 1,
-		borderColor: `${C.downloaded}30`,
+		borderColor: `${COLORS.success}30`,
 	},
 	sheetDownloadedText: {
-		color: C.downloaded,
+		color: COLORS.success,
 		fontSize: 15,
 		fontWeight: '600',
 	},
@@ -842,203 +1109,35 @@ const styles = StyleSheet.create({
 		padding: 14,
 		borderRadius: 12,
 		borderWidth: 1,
-		borderColor: `${C.error}30`,
-		backgroundColor: `${C.error}10`,
+		borderColor: '#DC262630',
+		backgroundColor: '#DC262610',
 	},
-	sheetDeleteText: { color: C.error, fontSize: 14, fontWeight: '600' },
+	sheetDeleteText: { color: '#DC2626', fontSize: 14, fontWeight: '600' },
 	sheetDownloadButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'center',
 		gap: 10,
-		backgroundColor: C.primaryMid,
+		backgroundColor: COLORS.primary,
 		borderRadius: 14,
 		padding: 16,
 		marginTop: 8,
 	},
-	sheetDownloadButtonText: {
-		color: C.white,
-		fontSize: 16,
-		fontWeight: '700',
-	},
+	sheetDownloadButtonText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
 	sheetDownloadingRow: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		gap: 10,
 		justifyContent: 'center',
 		padding: 16,
-		backgroundColor: `${C.primaryMid}15`,
+		backgroundColor: '#F0EDFF',
 		borderRadius: 14,
 		borderWidth: 1,
-		borderColor: `${C.primaryMid}30`,
+		borderColor: `${COLORS.primary}30`,
 	},
 	sheetDownloadingText: {
-		color: C.primaryMid,
+		color: COLORS.primary,
 		fontSize: 14,
 		fontWeight: '600',
-	},
-	header: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'space-between',
-		paddingHorizontal: H_PADDING,
-		paddingBottom: 16,
-		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderColor: C.border,
-		backgroundColor: C.bg,
-	},
-	backButton: {
-		width: 40,
-		height: 40,
-		borderRadius: 20,
-		backgroundColor: C.surface,
-		alignItems: 'center',
-		justifyContent: 'center',
-	},
-	headerTitleContainer: {
-		alignItems: 'center',
-	},
-	headerTitle: {
-		color: C.textPrimary,
-		fontSize: 18,
-		fontWeight: '700',
-	},
-	headerSubtitle: {
-		color: C.textMuted,
-		fontSize: 12,
-		marginTop: 1,
-	},
-	headerRightPlaceholder: {
-		width: 40,
-	},
-	gridContainer: {
-		paddingHorizontal: H_PADDING,
-		paddingTop: 16,
-	},
-	gridRow: {
-		justifyContent: 'space-between',
-		marginBottom: COLUMN_GAP,
-	},
-	card: {
-		width: CARD_W,
-		height: CARD_H,
-		backgroundColor: C.surface,
-		borderRadius: 16,
-		overflow: 'hidden',
-		borderWidth: 1,
-		borderColor: C.border,
-	},
-	cardSelected: {
-		borderColor: C.accent,
-	},
-	cardImage: {
-		...StyleSheet.absoluteFillObject,
-	},
-	cardBadgeContainer: {
-		position: 'absolute',
-		top: 10,
-		right: 10,
-		zIndex: 2,
-	},
-	statusBadge: {
-		width: 24,
-		height: 24,
-		borderRadius: 12,
-		alignItems: 'center',
-		justifyContent: 'center',
-	},
-	badgeDownloaded: {
-		backgroundColor: 'rgba(16, 185, 129, 0.2)',
-	},
-	badgeCloud: {
-		backgroundColor: 'rgba(10, 10, 18, 0.65)',
-	},
-	cardContent: {
-		position: 'absolute',
-		bottom: 0,
-		left: 0,
-		right: 0,
-		padding: 12,
-	},
-	cardName: {
-		color: C.textPrimary,
-		fontSize: 14,
-		fontWeight: '600',
-	},
-	cardSize: {
-		color: C.textMuted,
-		fontSize: 11,
-		marginTop: 2,
-	},
-	emptyContainer: {
-		alignItems: 'center',
-		justifyContent: 'center',
-		paddingVertical: 80,
-		paddingHorizontal: 32,
-	},
-	emptyText: {
-		color: C.textPrimary,
-		fontSize: 15,
-		fontWeight: '600',
-		marginTop: 12,
-	},
-	emptySubtext: {
-		color: C.textMuted,
-		fontSize: 13,
-		textAlign: 'center',
-		marginTop: 4,
-		lineHeight: 18,
-	},
-	actionBar: {
-		position: 'absolute',
-		bottom: 0,
-		left: 0,
-		right: 0,
-		backgroundColor: C.bg,
-		borderTopWidth: StyleSheet.hairlineWidth,
-		borderColor: C.border,
-		flexDirection: 'row',
-		alignItems: 'center',
-		paddingHorizontal: 16,
-		paddingTop: 14,
-		gap: 12,
-	},
-	actionBarDetails: {
-		flex: 1,
-		justifyContent: 'center',
-	},
-	actionStyleName: {
-		color: C.textPrimary,
-		fontSize: 15,
-		fontWeight: '700',
-	},
-	actionStyleStatus: {
-		color: C.textMuted,
-		fontSize: 11,
-		marginTop: 2,
-	},
-	actionPlaceholder: {
-		color: C.textMuted,
-		fontSize: 13,
-		fontStyle: 'italic',
-	},
-	applyButton: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'center',
-		backgroundColor: C.accent,
-		borderRadius: 12,
-		paddingVertical: 13,
-		paddingHorizontal: 16,
-		gap: 6,
-		minWidth: 165,
-	},
-	applyButtonDisabled: {
-		opacity: 0.4,
-	},
-	applyButtonText: {
-		color: C.textPrimary,
-		fontSize: 14,
-		fontWeight: '700',
 	},
 })

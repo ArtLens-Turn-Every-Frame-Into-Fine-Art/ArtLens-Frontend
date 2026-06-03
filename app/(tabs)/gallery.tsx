@@ -26,6 +26,7 @@ import {
 	FlatList,
 	GestureResponderEvent,
 	Pressable,
+	ScrollView,
 	StyleSheet,
 	Text,
 	View,
@@ -46,9 +47,11 @@ import {
 	AlertCircle,
 	Battery,
 	CheckCircle2,
+	ChevronDown,
 	Clock,
 	Images,
 	RefreshCw,
+	Sparkles,
 	Trash2,
 	Zap,
 	Camera,
@@ -68,25 +71,25 @@ import type { StyleJob, JobStatus } from '@/types'
 const tracker = createTracker('GalleryScreen')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DESIGN TOKENS
+// DESIGN TOKENS — Light Theme
 // ─────────────────────────────────────────────────────────────────────────────
 
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	primaryGlow: '#9F67FF',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	success: '#059669',
-	downloaded: '#10B981',
-	warning: '#D97706',
-	error: '#DC2626',
-	errorSoft: '#EF4444',
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	surfaceHigh: '#F2F2F7',
+	border: '#F2F2F7',
+	primary: '#7B61FF',
+	primaryMid: '#7B61FF',
+	primaryGlow: '#A291FF',
+	text: '#1C1C1E',
+	textMuted: '#8E8E93',
+	textDim: '#C7C7CC',
+	success: '#4CD964',
+	downloaded: '#34C759',
+	warning: '#FF9F0A',
+	error: '#FF3B30',
+	errorSoft: '#FF3B30',
 	white: '#FFFFFF',
 } as const
 
@@ -421,6 +424,30 @@ const SectionHeader = React.memo<SectionHeaderProps>(
 )
 SectionHeader.displayName = 'SectionHeader'
 
+// ── Stat Pill ─────────────────────────────────────────────────────────────────
+
+const StatPill = React.memo<{ label: string; value: string }>(
+	({ label, value }) => (
+		<View style={styles.statPill}>
+			<Text style={styles.statLabel}>{label}: </Text>
+			<Text style={styles.statValue}>{value}</Text>
+		</View>
+	)
+)
+StatPill.displayName = 'StatPill'
+
+// ── Tip Card ──────────────────────────────────────────────────────────────────
+
+const TipCard = React.memo<{ question: string; answer: string }>(
+	({ question, answer }) => (
+		<View style={styles.tipCard}>
+			<Text style={styles.tipQuestion}>{question}</Text>
+			<Text style={styles.tipAnswer}>{answer}</Text>
+		</View>
+	)
+)
+TipCard.displayName = 'TipCard'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,6 +492,24 @@ export default function GalleryScreen(): React.JSX.Element {
 		[activeJobs]
 	)
 
+	const styleNameMap = useMemo<Record<string, string>>(() => {
+		const map: Record<string, string> = {}
+		catalog.forEach((m) => {
+			map[m.id] = m.name
+		})
+		return map
+	}, [catalog])
+
+	// Most-used style name for stats pill
+	const favoriteStyle = useMemo(() => {
+		const freq: Record<string, number> = {}
+		jobs.forEach((j) => {
+			freq[j.styleId] = (freq[j.styleId] ?? 0) + 1
+		})
+		const topId = Object.entries(freq).sort((a, b) => b[1] - a[1])[0]?.[0]
+		return topId ? (styleNameMap[topId] ?? '—') : '—'
+	}, [jobs, styleNameMap])
+
 	const queuePositions = useMemo<Record<string, number>>(() => {
 		const queued = activeJobs.filter((j) => j.status === 'QUEUED')
 		const map: Record<string, number> = {}
@@ -473,14 +518,6 @@ export default function GalleryScreen(): React.JSX.Element {
 		})
 		return map
 	}, [activeJobs])
-
-	const styleNameMap = useMemo<Record<string, string>>(() => {
-		const map: Record<string, string> = {}
-		catalog.forEach((m) => {
-			map[m.id] = m.name
-		})
-		return map
-	}, [catalog])
 
 	// Auto worker trigger pipeline optimization
 	const jobStatusFingerprint = useMemo(
@@ -629,7 +666,42 @@ export default function GalleryScreen(): React.JSX.Element {
 										</Text>
 									</View>
 								)}
+								<View style={styles.profileCircle} />
 							</View>
+						</View>
+
+						{/* Stats Row */}
+						<ScrollView
+							horizontal
+							showsHorizontalScrollIndicator={false}
+							style={styles.statsRow}
+						>
+							<StatPill label="Total" value={String(totalJobs)} />
+							<StatPill label="Favorite" value={favoriteStyle} />
+							<StatPill
+								label="This Week"
+								value={String(
+									jobs.filter(
+										(j) =>
+											Date.now() - j.createdAt <
+											7 * 24 * 60 * 60 * 1000
+									).length
+								)}
+							/>
+						</ScrollView>
+
+						{/* Filter Bar */}
+						<View style={styles.filterBar}>
+							<Pressable style={styles.filterDropdown}>
+								<Text style={styles.filterText}>
+									All Styles
+								</Text>
+								<ChevronDown size={16} color={C.text} />
+							</Pressable>
+							<Pressable style={styles.filterDropdown}>
+								<Text style={styles.filterText}>Date</Text>
+								<ChevronDown size={16} color={C.text} />
+							</Pressable>
 						</View>
 
 						{/* Stream Section 1 Rendering */}
@@ -679,6 +751,41 @@ export default function GalleryScreen(): React.JSX.Element {
 							</View>
 						)}
 					</View>
+				}
+				ListFooterComponent={
+					totalJobs > 0 ? (
+						<View style={styles.footerContainer}>
+							<Text style={styles.tipsSectionTitle}>
+								Quick Tips
+							</Text>
+							<TipCard
+								question="Where are my photos saved?"
+								answer="All artworks are saved locally on your device in high resolution."
+							/>
+							<TipCard
+								question="Can I re-edit an artwork?"
+								answer="Yes, tap any image and select 'Edit' to apply new styles."
+							/>
+							<Pressable
+								onPress={handleGoToCamera}
+								style={({ pressed }) => [
+									styles.transformBtn,
+									pressed && styles.transformBtnPressed,
+								]}
+								accessibilityRole="button"
+								accessibilityLabel="Transform another photo"
+							>
+								<Sparkles
+									color={C.white}
+									size={20}
+									strokeWidth={2}
+								/>
+								<Text style={styles.transformBtnText}>
+									Transform Another Photo
+								</Text>
+							</Pressable>
+						</View>
+					) : null
 				}
 				ListEmptyComponent={
 					totalJobs === 0 ? (
@@ -755,6 +862,12 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 		justifyContent: 'space-between',
 		paddingVertical: 12,
+		backgroundColor: C.surface,
+		borderBottomWidth: 1,
+		borderBottomColor: C.border,
+		marginHorizontal: -H_PADDING,
+		paddingHorizontal: H_PADDING,
+		marginBottom: 16,
 	},
 	pageHeaderLeft: {
 		flexDirection: 'row',
@@ -762,18 +875,20 @@ const styles = StyleSheet.create({
 		gap: 8,
 	},
 	pageTitle: {
-		fontSize: 26,
+		fontSize: 22,
 		fontWeight: '800',
 		color: C.text,
-		letterSpacing: -0.5,
+		letterSpacing: -0.3,
 	},
 	pageHeaderRight: {
-		justifyContent: 'center',
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 8,
 	},
 	processingPill: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: C.surface,
+		backgroundColor: C.surfaceHigh,
 		paddingHorizontal: 10,
 		paddingVertical: 6,
 		borderRadius: 20,
@@ -798,8 +913,8 @@ const styles = StyleSheet.create({
 		gap: 8,
 	},
 	sectionTitle: {
-		fontSize: 16,
-		fontWeight: '700',
+		fontSize: 18,
+		fontWeight: '800',
 		color: C.text,
 	},
 	sectionCount: {
@@ -831,11 +946,16 @@ const styles = StyleSheet.create({
 	activeRow: {
 		flexDirection: 'row',
 		backgroundColor: C.surface,
-		borderRadius: 14,
+		borderRadius: 12,
 		borderWidth: 1,
 		borderColor: C.border,
 		padding: 10,
 		gap: 12,
+		shadowColor: '#000',
+		shadowOffset: { width: 0, height: 1 },
+		shadowOpacity: 0.06,
+		shadowRadius: 4,
+		elevation: 2,
 	},
 	activeRowPressed: {
 		borderColor: C.primaryMid,
@@ -845,7 +965,7 @@ const styles = StyleSheet.create({
 		height: 64,
 		borderRadius: 10,
 		overflow: 'hidden',
-		backgroundColor: C.bg,
+		backgroundColor: C.surfaceHigh,
 	},
 	activeRowThumbImage: {
 		width: '100%',
@@ -853,7 +973,7 @@ const styles = StyleSheet.create({
 	},
 	activeRowThumbOverlay: {
 		...StyleSheet.absoluteFillObject,
-		backgroundColor: 'rgba(8, 8, 16, 0.72)',
+		backgroundColor: 'rgba(255,255,255,0.6)',
 		alignItems: 'center',
 		justifyContent: 'center',
 	},
@@ -915,10 +1035,15 @@ const styles = StyleSheet.create({
 		width: TILE_W,
 		height: TILE_H,
 		backgroundColor: C.surface,
-		borderRadius: 16,
+		borderRadius: 12,
 		borderWidth: 1,
 		borderColor: C.border,
 		overflow: 'hidden',
+		shadowColor: '#000',
+		shadowOffset: { width: 0, height: 1 },
+		shadowOpacity: 0.08,
+		shadowRadius: 4,
+		elevation: 2,
 	},
 	tilePressed: {
 		opacity: 0.85,
@@ -929,7 +1054,7 @@ const styles = StyleSheet.create({
 		height: '100%',
 	},
 	tileImageError: {
-		opacity: 0.2,
+		opacity: 0.25,
 	},
 	errorOverlay: {
 		...StyleSheet.absoluteFillObject,
@@ -953,9 +1078,7 @@ const styles = StyleSheet.create({
 	retryButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: C.surfaceHigh,
-		borderWidth: 1,
-		borderColor: C.border,
+		backgroundColor: C.primaryMid,
 		paddingHorizontal: 10,
 		paddingVertical: 5,
 		borderRadius: 10,
@@ -971,9 +1094,7 @@ const styles = StyleSheet.create({
 		bottom: 0,
 		left: 0,
 		right: 0,
-		backgroundColor: 'rgba(16, 16, 28, 0.85)',
-		borderTopWidth: StyleSheet.hairlineWidth,
-		borderTopColor: 'rgba(30, 30, 48, 0.5)',
+		backgroundColor: 'rgba(0,0,0,0.2)',
 		flexDirection: 'row',
 		alignItems: 'center',
 		paddingHorizontal: 10,
@@ -985,7 +1106,7 @@ const styles = StyleSheet.create({
 		fontWeight: '700',
 	},
 	tileStyleName: {
-		color: C.text,
+		color: C.white,
 		fontSize: 11,
 		fontWeight: '500',
 		flex: 1,
@@ -1040,8 +1161,118 @@ const styles = StyleSheet.create({
 		borderTopColor: 'transparent',
 	},
 	ringPercentText: {
-		color: C.white,
+		color: C.text,
 		fontSize: 10,
 		fontWeight: '800',
+	},
+
+	// ── Profile circle (header) ────────────────────────────────────────────
+	profileCircle: {
+		width: 40,
+		height: 40,
+		borderRadius: 20,
+		backgroundColor: C.surfaceHigh,
+		borderWidth: 1,
+		borderColor: C.border,
+	},
+
+	// ── Stats pills row ────────────────────────────────────────────────────
+	statsRow: {
+		marginBottom: 16,
+	},
+	statPill: {
+		flexDirection: 'row',
+		backgroundColor: C.surface,
+		paddingHorizontal: 16,
+		paddingVertical: 10,
+		borderRadius: 20,
+		marginRight: 10,
+		borderWidth: 1,
+		borderColor: C.border,
+	},
+	statLabel: {
+		color: C.textMuted,
+		fontSize: 14,
+	},
+	statValue: {
+		color: C.text,
+		fontWeight: '700',
+		fontSize: 14,
+	},
+
+	// ── Filter bar ─────────────────────────────────────────────────────────
+	filterBar: {
+		flexDirection: 'row',
+		gap: 10,
+		marginBottom: 20,
+	},
+	filterDropdown: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		backgroundColor: C.surfaceHigh,
+		paddingHorizontal: 12,
+		paddingVertical: 8,
+		borderRadius: 8,
+		gap: 4,
+	},
+	filterText: {
+		fontSize: 14,
+		fontWeight: '600',
+		color: C.text,
+	},
+
+	// ── Footer: tips + CTA ─────────────────────────────────────────────────
+	footerContainer: {
+		paddingHorizontal: H_PADDING,
+		paddingTop: 8,
+	},
+	tipsSectionTitle: {
+		fontSize: 18,
+		fontWeight: '800',
+		color: C.text,
+		marginTop: 20,
+		marginBottom: 15,
+	},
+	tipCard: {
+		backgroundColor: C.surface,
+		padding: 16,
+		borderRadius: 12,
+		marginBottom: 12,
+		borderWidth: 1,
+		borderColor: C.border,
+	},
+	tipQuestion: {
+		fontSize: 15,
+		fontWeight: '700',
+		color: C.text,
+		marginBottom: 6,
+	},
+	tipAnswer: {
+		fontSize: 13,
+		color: C.textMuted,
+		lineHeight: 18,
+	},
+	transformBtn: {
+		backgroundColor: C.primaryMid,
+		flexDirection: 'row',
+		alignItems: 'center',
+		justifyContent: 'center',
+		paddingVertical: 16,
+		borderRadius: 30,
+		marginTop: 20,
+		gap: 8,
+		shadowColor: C.primaryMid,
+		shadowOffset: { width: 0, height: 4 },
+		shadowOpacity: 0.3,
+		shadowRadius: 8,
+		elevation: 5,
+	},
+	transformBtnPressed: {
+		opacity: 0.85,
+	},
+	transformBtnText: {
+		color: C.white,
+		fontSize: 16,
+		fontWeight: '700',
 	},
 })

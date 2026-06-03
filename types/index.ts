@@ -14,6 +14,10 @@
 export type StyleId = string
 export type JobId = string
 export type ClientHash = string
+export type Config = {
+	mainModel: number
+	previewModel?: number
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLE MODEL
@@ -46,7 +50,7 @@ export interface StyleModel {
 	/** URL to download the Main (full quality) .tflite model */
 	mainModelUrl: string
 	/** URL to a JSON file with per-model inference config (overlap, colour mode, etc.) */
-	config: string
+	config: Config
 	/** Local download state */
 	downloadStatus: DownloadStatus
 	/** Download progress [0, 1] — only meaningful when status === 'downloading' */
@@ -172,7 +176,6 @@ export interface HardwareProfile {
 export interface ModelUrls {
 	previewModelUrl: string
 	mainModelUrl: string
-	config: string
 }
 
 /** Parsed contents of a style's config.json fetched from config. */
@@ -181,7 +184,7 @@ export interface ModelConfig {
 	tileOverlap: number
 	/** 'texture_only' | 'lab_match' | 'none' — post-processing colour mode. */
 	preferredColourMode: 'texture_only' | 'lab_match' | 'none'
-	/** Main model tile resolution. Always 512 per PRD. */
+	/** Main model tile resolution. */
 	inferenceResolution: number
 	/** Preview model tile resolution. Always 256 per PRD. */
 	previewResolution: number
@@ -215,7 +218,7 @@ export interface ManifestUpdate {
 	isActive: boolean
 	previewModelUrl: string
 	mainModelUrl: string
-	config?: string
+	config: Config
 }
 
 /** Full body of a successful POST /api/models-manifest 200 response. */

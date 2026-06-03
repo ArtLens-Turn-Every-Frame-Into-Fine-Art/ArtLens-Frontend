@@ -28,6 +28,7 @@ import {
 	Pressable,
 	StyleSheet,
 	Text,
+	TouchableOpacity,
 	View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -57,7 +58,7 @@ import { createTracker } from '@/shared/utils/logger'
 const tracker = createTracker('refine_screen')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DESIGN TOKENS — matches ArtLens app-wide palette
+// DESIGN TOKENS — matches app-wide dark palette (same as BackgroundGenerator)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const C = {
@@ -67,6 +68,7 @@ const C = {
 	border: '#1E1E30',
 	primary: '#6D28D9',
 	primaryMid: '#7C3AED',
+	primaryLight: '#A291FF',
 	text: '#F4F4FF',
 	textMuted: '#7070A0',
 	textDim: '#40405A',
@@ -132,10 +134,10 @@ export default function RefineScreen(): React.JSX.Element {
 	const overlayImage = useImage(overlayUri)
 
 	// ── Style intensity state ─────────────────────────────────────────────────
-	// `intensity`       — live slider value 0–100 (integer %, shown to user)
-	// `appliedIntensity`— the value at which Stylise was last run (starts at 100)
-	// `intensityDirty`  — true when slider has moved from the last applied value
-	//                     → activates the Stylise button
+	// `intensity`        — live slider value 0–100 (integer %, shown to user)
+	// `appliedIntensity` — the value at which Stylise was last run (starts at 100)
+	// `intensityDirty`   — true when slider has moved from the last applied value
+	//                      → activates the Stylise button
 	const [intensity, setIntensity] = useState(100)
 	const appliedIntensityRef = useRef(100)
 	const [intensityDirty, setIntensityDirty] = useState(false)
@@ -149,7 +151,7 @@ export default function RefineScreen(): React.JSX.Element {
 	// alphaBlend for Skia canvas: intensity/100
 	const alphaBlend = intensity / 100
 
-	// ── UI loading state ─────────────────────────────────────────────────────
+	// ── UI loading state ──────────────────────────────────────────────────────
 	const [isStylising, setIsStylising] = useState(false)
 	const [isExporting, setIsExporting] = useState(false)
 
@@ -187,16 +189,12 @@ export default function RefineScreen(): React.JSX.Element {
 		return destFile.uri
 	}, [canvasRef, jobId])
 
-	// ── "Stylise" — apply the current intensity to produce a snapshot ─────────
-	// After running, intensity is marked as applied and the button deactivates.
+	// ── "Stylise" — apply current intensity, produce snapshot ─────────────────
 	const handleStylise = useCallback(async () => {
 		if (!intensityDirty || isStylising) return
 		setIsStylising(true)
 		try {
-			// The Skia canvas already renders at the new alphaBlend (opacity).
-			// Taking a snapshot captures the blended output at the chosen intensity.
 			await takeSnapshot()
-			// Mark intensity as applied → deactivate the Stylise button.
 			appliedIntensityRef.current = intensity
 			setIntensityDirty(false)
 			tracker.log('Style intensity applied via Skia snapshot', {
@@ -218,7 +216,7 @@ export default function RefineScreen(): React.JSX.Element {
 		}
 	}, [intensityDirty, isStylising, takeSnapshot, intensity, jobId])
 
-	// ── "Export" — snapshot current canvas and push to ExportScreen ───────────
+	// ── "Export" — snapshot canvas and push to ExportScreen ───────────────────
 	const handleExport = useCallback(async () => {
 		if (isExporting) return
 		setIsExporting(true)
@@ -250,7 +248,7 @@ export default function RefineScreen(): React.JSX.Element {
 		}
 	}, [isExporting, takeSnapshot, jobId, intensity])
 
-	// ── Guard: unreachable unless job is DONE ────────────────────────────────
+	// ── Guard: unreachable unless job is DONE ─────────────────────────────────
 	if (!job || job.status !== 'DONE' || !job.resultUri) {
 		return (
 			<View
@@ -276,25 +274,27 @@ export default function RefineScreen(): React.JSX.Element {
 
 	return (
 		<View style={[styles.screen, { backgroundColor: C.bg }]}>
-			{/* ── Header ──────────────────────────────────────────────────── */}
+			{/* ── Header ──────────────────────────────────────────────────────── */}
 			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
-				<Pressable
+				<TouchableOpacity
 					onPress={() => router.back()}
 					style={styles.headerBtn}
 					accessibilityRole="button"
 					accessibilityLabel="Go back to canvas"
-					hitSlop={12}
+					hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
 				>
 					<ChevronLeft color={C.text} size={26} strokeWidth={1.8} />
-				</Pressable>
+				</TouchableOpacity>
 
 				<View style={styles.headerCenter}>
-					<Text style={styles.headerTitle}>Refine</Text>
+					<View style={styles.headerTitleRow}>
+						<Text style={styles.headerTitleMain}>Refine</Text>
+					</View>
 					<Text style={styles.headerSub}>{styleName}</Text>
 				</View>
 
 				{/* Export button — always active once images are ready */}
-				<Pressable
+				<TouchableOpacity
 					onPress={handleExport}
 					disabled={isExporting || !imagesReady}
 					style={[
@@ -317,10 +317,10 @@ export default function RefineScreen(): React.JSX.Element {
 							<Text style={styles.exportText}>Export</Text>
 						</View>
 					)}
-				</Pressable>
+				</TouchableOpacity>
 			</View>
 
-			{/* ── Canvas workspace ────────────────────────────────────────── */}
+			{/* ── Canvas workspace ─────────────────────────────────────────────── */}
 			<View
 				style={[styles.canvasWrap, { width: canvasW, height: canvasH }]}
 			>
@@ -387,7 +387,7 @@ export default function RefineScreen(): React.JSX.Element {
 				</View>
 			</View>
 
-			{/* ── Slider panel ────────────────────────────────────────────── */}
+			{/* ── Slider panel ─────────────────────────────────────────────────── */}
 			<View
 				style={[
 					styles.panel,
@@ -432,7 +432,7 @@ export default function RefineScreen(): React.JSX.Element {
 				</View>
 
 				{/* Stylise button — active only when intensity has changed */}
-				<Pressable
+				<TouchableOpacity
 					onPress={handleStylise}
 					disabled={!intensityDirty || isStylising || !imagesReady}
 					style={[
@@ -468,7 +468,7 @@ export default function RefineScreen(): React.JSX.Element {
 					>
 						{isStylising ? 'Stylising…' : 'Stylise'}
 					</Text>
-				</Pressable>
+				</TouchableOpacity>
 
 				{/* Hint */}
 				<View style={styles.tipRow}>
@@ -501,10 +501,11 @@ const styles = StyleSheet.create({
 	header: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		paddingHorizontal: 12,
-		paddingBottom: 10,
+		paddingHorizontal: 16,
+		paddingBottom: 12,
 		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: '#1E1E30',
+		borderBottomColor: C.border,
+		backgroundColor: C.surface,
 	},
 	headerBtn: {
 		width: 40,
@@ -517,23 +518,31 @@ const styles = StyleSheet.create({
 		flex: 1,
 		alignItems: 'center',
 	},
-	headerTitle: {
-		color: '#F4F4FF',
-		fontSize: 17,
-		fontWeight: '700',
-		letterSpacing: -0.2,
+	headerTitleRow: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 6,
+	},
+	headerTitleMain: {
+		fontSize: 14,
+		fontWeight: '900',
+		color: C.text,
+		textTransform: 'uppercase',
+		letterSpacing: 1,
 	},
 	headerSub: {
-		color: '#7070A0',
+		color: C.primaryLight,
 		fontSize: 12,
+		fontWeight: '600',
 		marginTop: 2,
+		letterSpacing: 0.3,
 	},
 	exportBtn: {
-		backgroundColor: '#7C3AED',
+		backgroundColor: C.primaryMid,
 		borderRadius: 12,
 		paddingHorizontal: 14,
 		paddingVertical: 9,
-		minWidth: 72,
+		minWidth: 82,
 		alignItems: 'center',
 		justifyContent: 'center',
 	},
@@ -544,8 +553,8 @@ const styles = StyleSheet.create({
 	},
 	exportBtnDisabled: { opacity: 0.45 },
 	exportText: {
-		color: '#FFFFFF',
-		fontSize: 15,
+		color: C.white,
+		fontSize: 14,
 		fontWeight: '700',
 	},
 
@@ -581,19 +590,19 @@ const styles = StyleSheet.create({
 		paddingVertical: 4,
 	},
 	modeBadgeStyled: {
-		backgroundColor: 'rgba(124,58,237,0.8)',
+		backgroundColor: `${C.primaryMid}CC`,
 	},
 	modeBadgeText: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 11,
 		fontWeight: '600',
 	},
 
 	// ── Slider panel ──────────────────────────────────────────────────────────
 	panel: {
-		backgroundColor: '#10101C',
+		backgroundColor: C.surface,
 		borderTopWidth: StyleSheet.hairlineWidth,
-		borderTopColor: '#1E1E30',
+		borderTopColor: C.border,
 		paddingHorizontal: 20,
 		paddingTop: 20,
 		gap: 8,
@@ -609,12 +618,12 @@ const styles = StyleSheet.create({
 		gap: 6,
 	},
 	sliderLabel: {
-		color: '#F4F4FF',
+		color: C.text,
 		fontSize: 15,
 		fontWeight: '600',
 	},
 	sliderValue: {
-		color: '#7C3AED',
+		color: C.primaryLight,
 		fontSize: 15,
 		fontWeight: '800',
 		letterSpacing: -0.3,
@@ -629,7 +638,7 @@ const styles = StyleSheet.create({
 		marginTop: -6,
 	},
 	sliderEndLabel: {
-		color: '#40405A',
+		color: C.textDim,
 		fontSize: 11,
 		fontWeight: '500',
 	},
@@ -645,23 +654,28 @@ const styles = StyleSheet.create({
 		marginTop: 4,
 	},
 	styliseBtnActive: {
-		backgroundColor: '#7C3AED',
+		backgroundColor: C.primaryMid,
+		shadowColor: C.primary,
+		shadowOffset: { width: 0, height: 4 },
+		shadowOpacity: 0.35,
+		shadowRadius: 8,
+		elevation: 4,
 	},
 	styliseBtnInactive: {
-		backgroundColor: '#181828',
+		backgroundColor: C.surfaceHigh,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 	},
 	styliseBtnText: {
-		color: '#FFFFFF',
+		color: C.white,
 		fontSize: 15,
 		fontWeight: '700',
 	},
 	styliseBtnTextInactive: {
-		color: '#40405A',
+		color: C.textDim,
 	},
 
-	// ── Hint row ─────────────────────────────────────────────────────────────
+	// ── Hint row ──────────────────────────────────────────────────────────────
 	tipRow: {
 		flexDirection: 'row',
 		alignItems: 'flex-start',
@@ -669,7 +683,7 @@ const styles = StyleSheet.create({
 		marginTop: 2,
 	},
 	tipText: {
-		color: '#40405A',
+		color: C.textDim,
 		fontSize: 12,
 		flex: 1,
 		lineHeight: 17,
@@ -677,7 +691,7 @@ const styles = StyleSheet.create({
 
 	// ── Loading / fallback ────────────────────────────────────────────────────
 	loadingText: {
-		color: '#7070A0',
+		color: C.textMuted,
 		fontSize: 14,
 		fontWeight: '500',
 	},
@@ -686,7 +700,7 @@ const styles = StyleSheet.create({
 		padding: 10,
 	},
 	backFallbackText: {
-		color: '#7C3AED',
+		color: C.primaryMid,
 		fontSize: 15,
 		fontWeight: '700',
 	},

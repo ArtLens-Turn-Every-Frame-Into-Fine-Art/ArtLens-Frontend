@@ -1,17 +1,22 @@
 /**
- * ArtLens — BackgroundGenerator (Modal Stub)
+ * ArtLens — BackgroundGeneratorScreen
  *
- * PRD § 3.9 — Current Status: UI stub.
+ * PRD § 3.9 — Merges the full planned UI from BackgroundGenerator_old.tsx
+ * into the current dark-theme architecture.
  *
- * This screen presents the full planned UI for the prompt-based background
- * replacement feature. The generative API payload, mask selection engine,
- * and response polling logic are NOT yet implemented.
+ * UI includes:
+ *   - Main image preview with Subject Isolated badge
+ *   - AI Prompt text input with suggestions
+ *   - Keep Subject toggle
+ *   - Variations gallery with add button
+ *   - Sticky footer with Back + Regenerate actions
+ *   - Coming-soon banner (feature stub)
  *
- * Planned flow:
+ * Generation flow (NOT yet implemented):
  *   1. Source image displayed; user draws/selects foreground mask
  *   2. User types a text prompt ("ancient ruins at sunset")
  *   3. Prompt + segmented foreground PNG sent to backend
- *   4. Blended result returned and passed back to EditCanvas for refinement
+ *   4. Blended result returned and passed back to EditCanvas
  *
  * Dependencies:
  *   - src/shared/stores/useStyleJobStore
@@ -25,31 +30,35 @@ import {
 	Pressable,
 	ScrollView,
 	StyleSheet,
+	Switch,
 	Text,
 	TextInput,
+	TouchableOpacity,
 	View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router, useLocalSearchParams } from 'expo-router'
 import { Image } from 'expo-image'
+import { BlurView } from 'expo-blur'
 import {
 	ChevronLeft,
 	Construction,
-	Image as ImageIcon,
 	Lightbulb,
+	Plus,
+	RotateCcw,
+	Scissors,
 	Sparkles,
+	UserCheck,
 	Wand2,
 } from 'lucide-react-native'
-import { LinearGradient } from 'expo-linear-gradient'
 
-// — Stores ———————————————————————————————————————————————————————————————————
+// — Stores ————————————————————————————————————————————————————————————————————
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
-
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('Background-Generator')
 
-// — Design tokens —————————————————————————————————————————————————————————————
+// — Design tokens — dark palette matching app-wide theme ——————————————————————
 const C = {
 	bg: '#080810',
 	surface: '#10101C',
@@ -57,15 +66,17 @@ const C = {
 	border: '#1E1E30',
 	primary: '#6D28D9',
 	primaryMid: '#7C3AED',
+	primaryLight: '#A291FF',
 	accent: '#C026D3',
 	text: '#F4F4FF',
 	textMuted: '#7070A0',
 	textDim: '#40405A',
 	warning: '#D97706',
+	success: '#00FF94',
 	white: '#FFFFFF',
 } as const
 
-// — Prompt suggestions (example prompts for the user) ————————————————————————
+// — Prompt suggestions ————————————————————————————————————————————————————————
 const PROMPT_SUGGESTIONS = [
 	'Ancient ruins at sunset',
 	'Starry night galaxy sky',
@@ -75,7 +86,18 @@ const PROMPT_SUGGESTIONS = [
 	'Frozen Arctic tundra',
 ] as const
 
-// — Suggestion chip ——————————————————————————————————————————————————————————
+// — Fallback variation images —————————————————————————————————————————————————
+const DEFAULT_VARIATIONS = [
+	'https://images.unsplash.com/photo-1514565131-fce0801e5785?w=400',
+	'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=400',
+	'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=400',
+] as const
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB-COMPONENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// — Suggestion chip ———————————————————————————————————————————————————————————
 interface SuggestionChipProps {
 	label: string
 	onPress: (label: string) => void
@@ -111,25 +133,39 @@ const ComingSoonBanner: React.FC = () => (
 	</View>
 )
 
-// — Main Screen ——————————————————————————————————————————————————————————————
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN SCREEN
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function BackgroundGeneratorScreen(): React.JSX.Element {
 	const insets = useSafeAreaInsets()
 
-	// — Params & job —————————————————————————————————————————————————————————
+	// — Params & job ——————————————————————————————————————————————————————————
 	const { jobId } = useLocalSearchParams<{ jobId?: string }>()
 	const job = useStyleJobStore((s) =>
 		jobId ? (s.jobs.find((j) => j.id === jobId) ?? null) : null
 	)
 
-	// — Local state ——————————————————————————————————————————————————————————
+	// — Local state ———————————————————————————————————————————————————————————
 	const [prompt, setPrompt] = useState('')
-	//const [isGenerating, setIsGenerating] = useState(false) // always false — stub
+	const [keepSubject, setKeepSubject] = useState(true)
+	const [selectedVariation, setSelectedVariation] = useState(0)
+
+	// Use job source as first variation if available, otherwise fall back to defaults
+	const variations: string[] = job?.sourceUri
+		? [job.sourceUri, ...DEFAULT_VARIATIONS.slice(1)]
+		: [...DEFAULT_VARIATIONS]
 
 	const handleSuggestion = useCallback(
 		(label: string) => setPrompt(label),
 		[]
 	)
+
+	const handleReset = useCallback(() => {
+		setPrompt('')
+		setKeepSubject(true)
+		setSelectedVariation(0)
+	}, [])
 
 	const handleGenerate = useCallback(() => {
 		// STUB: generation logic not yet implemented.
@@ -141,98 +177,92 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 		tracker.warn('[BackgroundGenerator] Generation not yet implemented.')
 	}, [])
 
-	// — Source image URI (for preview) ———————————————————————————————————————
-	const sourceUri = job?.sourceUri
+	const previewUri = variations[selectedVariation]
 
 	return (
 		<KeyboardAvoidingView
 			behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
 			style={[styles.screen, { backgroundColor: C.bg }]}
 		>
-			{/* ── Header ────────────────────────────────────────────────────── */}
+			{/* ── Header ──────────────────────────────────────────────────────── */}
 			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
-				<Pressable
+				<TouchableOpacity
 					onPress={() => router.back()}
 					style={styles.headerBtn}
 					accessibilityRole="button"
 					accessibilityLabel="Go back"
-					hitSlop={12}
+					hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
 				>
 					<ChevronLeft color={C.text} size={26} strokeWidth={1.8} />
-				</Pressable>
+				</TouchableOpacity>
+
 				<View style={styles.headerCenter}>
-					<Wand2 color={C.primaryMid} size={16} strokeWidth={1.8} />
-					<Text style={styles.headerTitle}>BG Generator</Text>
+					<Wand2 color={C.primaryMid} size={15} strokeWidth={1.8} />
+					<Text style={styles.headerTitleMain}>Background</Text>
+					<Text
+						style={[
+							styles.headerTitleMain,
+							{ color: C.primaryLight },
+						]}
+					>
+						Generator
+					</Text>
 				</View>
-				<View style={{ width: 40 }} />
+
+				<TouchableOpacity
+					onPress={handleReset}
+					accessibilityRole="button"
+					accessibilityLabel="Reset all fields"
+				>
+					<Text style={styles.resetText}>Reset</Text>
+				</TouchableOpacity>
 			</View>
 
 			<ScrollView
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 24 },
+					{ paddingBottom: insets.bottom + 100 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>
-				{/* ── Coming soon banner ────────────────────────────────────── */}
+				{/* ── Coming soon banner ───────────────────────────────────────── */}
 				<ComingSoonBanner />
 
-				{/* ── Source image preview ──────────────────────────────────── */}
+				{/* ── Main preview with Subject Isolated badge ─────────────────── */}
 				<View style={styles.section}>
-					<Text style={styles.sectionLabel}>Source photo</Text>
-					<View style={styles.imageCard}>
-						{sourceUri ? (
-							<Image
-								source={{ uri: sourceUri }}
-								style={styles.sourceImage}
-								contentFit="cover"
-								cachePolicy="disk"
-								accessibilityLabel="Source photo for background replacement"
-							/>
-						) : (
-							<View style={styles.imagePlaceholder}>
-								<ImageIcon
-									color={C.textDim}
-									size={36}
-									strokeWidth={1.2}
-								/>
-								<Text style={styles.placeholderText}>
-									No photo selected
-								</Text>
-							</View>
-						)}
-
-						{/* Mask selection — stub overlay */}
-						{sourceUri && (
-							<View
-								style={styles.maskOverlay}
-								pointerEvents="none"
-							>
-								<LinearGradient
-									colors={[
-										`${C.primary}00`,
-										`${C.primary}40`,
-									]}
-									style={StyleSheet.absoluteFill}
-								/>
-								<View style={styles.maskBadge}>
-									<Text style={styles.maskBadgeText}>
-										Tap to select foreground mask (coming
-										soon)
-									</Text>
-								</View>
-							</View>
-						)}
+					<View style={styles.previewContainer}>
+						<Image
+							source={{ uri: previewUri }}
+							style={styles.mainPreview}
+							contentFit="cover"
+							cachePolicy="disk"
+							accessibilityLabel="Background preview"
+						/>
+						{/* Subject Isolated badge — mirrors BackgroundGenerator_old */}
+						<BlurView
+							intensity={60}
+							tint="dark"
+							style={styles.subjectBadge}
+						>
+							<UserCheck size={14} color={C.success} />
+							<Text style={styles.subjectBadgeText}>
+								Subject Isolated
+							</Text>
+						</BlurView>
 					</View>
 				</View>
 
-				{/* ── Prompt input ──────────────────────────────────────────── */}
+				{/* ── Prompt section ───────────────────────────────────────────── */}
 				<View style={styles.section}>
-					<Text style={styles.sectionLabel}>
-						Describe the new background
-					</Text>
-
+					<View style={styles.labelRow}>
+						<Text style={styles.sectionLabel}>AI PROMPT</Text>
+						<Sparkles
+							size={13}
+							color={C.primaryMid}
+							strokeWidth={1.5}
+						/>
+					</View>
 					<View style={styles.promptCard}>
 						<Sparkles
 							color={C.primaryMid}
@@ -241,14 +271,13 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 						/>
 						<TextInput
 							style={styles.promptInput}
-							placeholder="e.g. Ancient ruins at sunset, fog rolling in"
+							placeholder="e.g., 'Cyberpunk city at night with neon lights'..."
 							placeholderTextColor={C.textDim}
 							value={prompt}
 							onChangeText={setPrompt}
 							multiline
 							maxLength={200}
 							accessibilityLabel="Background prompt"
-							returnKeyType="default"
 						/>
 						{prompt.length > 0 && (
 							<Pressable
@@ -261,20 +290,19 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 							</Pressable>
 						)}
 					</View>
-
 					<Text style={styles.charCount}>{prompt.length}/200</Text>
 				</View>
 
-				{/* ── Suggestions ──────────────────────────────────────────── */}
+				{/* ── Suggestions ──────────────────────────────────────────────── */}
 				<View style={styles.section}>
-					<View style={styles.suggestionsHeader}>
+					<View style={styles.labelRow}>
 						<Lightbulb
 							color={C.textMuted}
-							size={14}
+							size={13}
 							strokeWidth={1.5}
 						/>
 						<Text style={styles.sectionLabel}>
-							Try a suggestion
+							TRY A SUGGESTION
 						</Text>
 					</View>
 					<View style={styles.chipsWrap}>
@@ -288,86 +316,124 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 					</View>
 				</View>
 
-				{/* ── Generate button (stub — disabled) ———————————————────── */}
-				<View style={styles.generateWrap}>
-					<Pressable
-						onPress={handleGenerate}
-						disabled={true} // stub: always disabled
-						style={[styles.generateBtn, styles.generateBtnDisabled]}
-						accessibilityRole="button"
-						accessibilityLabel="Generate background (coming soon)"
-						accessibilityState={{ disabled: true }}
-					>
-						<LinearGradient
-							colors={[`${C.primary}50`, `${C.accent}50`]}
-							start={{ x: 0, y: 0 }}
-							end={{ x: 1, y: 0 }}
-							style={styles.generateBtnGradient}
-						>
-							<Wand2
-								color={`${C.white}66`}
-								size={20}
+				{/* ── Keep Subject toggle ───────────────────────────────────────── */}
+				<View style={styles.toggleCard}>
+					<View style={styles.toggleLeft}>
+						<View style={styles.iconCircle}>
+							<Scissors
+								size={18}
+								color={C.primaryMid}
 								strokeWidth={1.8}
 							/>
-							<Text style={styles.generateBtnText}>
-								Generate Background
+						</View>
+						<View>
+							<Text style={styles.toggleLabel}>Keep Subject</Text>
+							<Text style={styles.toggleSub}>
+								Maintain original person details
 							</Text>
-						</LinearGradient>
-					</Pressable>
-
-					<Text style={styles.generateHint}>
-						Background generation requires a stable connection.
-						{'\n'}
-						Processing time: ~10–20 seconds.
-					</Text>
+						</View>
+					</View>
+					<Switch
+						value={keepSubject}
+						onValueChange={setKeepSubject}
+						trackColor={{ false: C.border, true: C.primaryMid }}
+						thumbColor={C.white}
+						accessibilityRole="switch"
+						accessibilityLabel="Toggle keep subject"
+					/>
 				</View>
 
-				{/* ── How it will work section ─────────────────────────────── */}
-				<View style={[styles.section, styles.howItWorksCard]}>
-					<Text style={styles.howTitle}>How it will work</Text>
-					{[
-						{
-							step: '1',
-							text: 'AI segments your subject from the background automatically.',
-						},
-						{
-							step: '2',
-							text: 'Your text prompt generates a new background via Stable Diffusion.',
-						},
-						{
-							step: '3',
-							text: 'The subject is composited onto the new scene.',
-						},
-						{
-							step: '4',
-							text: 'Refine the blend and export your final artwork.',
-						},
-					].map(({ step, text }) => (
-						<View key={step} style={styles.howRow}>
-							<View style={styles.howStep}>
-								<Text style={styles.howStepText}>{step}</Text>
-							</View>
-							<Text style={styles.howText}>{text}</Text>
-						</View>
-					))}
+				{/* ── Variations gallery ────────────────────────────────────────── */}
+				<View style={styles.section}>
+					<Text style={styles.sectionLabel}>VARIATIONS</Text>
+					<View style={styles.variationRow}>
+						{variations.map((uri, index) => (
+							<TouchableOpacity
+								key={index}
+								style={[
+									styles.variationThumb,
+									selectedVariation === index &&
+										styles.variationThumbActive,
+								]}
+								onPress={() => setSelectedVariation(index)}
+								accessibilityRole="button"
+								accessibilityLabel={`Select variation ${index + 1}`}
+								accessibilityState={{
+									selected: selectedVariation === index,
+								}}
+							>
+								<Image
+									source={{ uri }}
+									style={styles.variationImg}
+									contentFit="cover"
+									cachePolicy="disk"
+								/>
+							</TouchableOpacity>
+						))}
+						{/* Add variation — stub */}
+						<TouchableOpacity
+							style={styles.addVariation}
+							accessibilityRole="button"
+							accessibilityLabel="Add new variation (coming soon)"
+						>
+							<Plus size={22} color={C.white} strokeWidth={2} />
+						</TouchableOpacity>
+					</View>
 				</View>
 			</ScrollView>
+
+			{/* ── Sticky footer ───────────────────────────────────────────────── */}
+			<View
+				style={[
+					styles.footer,
+					{ paddingBottom: Math.max(insets.bottom, 16) },
+				]}
+			>
+				<TouchableOpacity
+					style={styles.cancelBtn}
+					onPress={() => router.back()}
+					accessibilityRole="button"
+					accessibilityLabel="Go back"
+				>
+					<Text style={styles.cancelBtnText}>Back</Text>
+				</TouchableOpacity>
+
+				<TouchableOpacity
+					style={[
+						styles.regenerateBtn,
+						{ opacity: 0.55 }, // stub: always disabled
+					]}
+					onPress={handleGenerate}
+					disabled={true}
+					accessibilityRole="button"
+					accessibilityLabel="Regenerate background (coming soon)"
+					accessibilityState={{ disabled: true }}
+				>
+					<RotateCcw size={17} color={C.white} strokeWidth={2} />
+					<Text style={styles.regenerateBtnText}>Regenerate</Text>
+				</TouchableOpacity>
+			</View>
 		</KeyboardAvoidingView>
 	)
 }
 
-// — Styles ————————————————————————————————————————————————————————————————————
+// ─────────────────────────────────────────────────────────────────────────────
+// STYLES
+// ─────────────────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
 	screen: { flex: 1 },
 
-	// Header
+	// ── Header ────────────────────────────────────────────────────────────────
 	header: {
 		flexDirection: 'row',
+		justifyContent: 'space-between',
 		alignItems: 'center',
-		paddingHorizontal: 12,
-		paddingBottom: 10,
+		paddingHorizontal: 16,
+		paddingBottom: 12,
 		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: '#1E1E30',
+		borderBottomColor: C.border,
+		backgroundColor: C.surface,
 	},
 	headerBtn: {
 		width: 40,
@@ -377,27 +443,30 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 	},
 	headerCenter: {
-		flex: 1,
 		flexDirection: 'row',
 		alignItems: 'center',
-		justifyContent: 'center',
-		gap: 6,
+		gap: 5,
 	},
-	headerTitle: {
+	headerTitleMain: {
+		fontSize: 14,
+		fontWeight: '900',
 		color: C.text,
-		fontSize: 17,
+		textTransform: 'uppercase',
+		letterSpacing: 1,
+	},
+	resetText: {
+		color: C.primaryLight,
 		fontWeight: '700',
-		letterSpacing: -0.2,
+		fontSize: 14,
 	},
 
-	// Scroll
+	// ── Scroll ────────────────────────────────────────────────────────────────
 	scrollContent: {
 		paddingHorizontal: 20,
 		paddingTop: 16,
-		gap: 4,
 	},
 
-	// Coming soon banner
+	// ── Coming soon banner ────────────────────────────────────────────────────
 	comingSoonBanner: {
 		flexDirection: 'row',
 		alignItems: 'flex-start',
@@ -421,65 +490,58 @@ const styles = StyleSheet.create({
 		lineHeight: 18,
 	},
 
-	// Sections
+	// ── Section ───────────────────────────────────────────────────────────────
 	section: { marginBottom: 24 },
-	sectionLabel: {
-		color: C.textMuted,
-		fontSize: 11,
-		fontWeight: '700',
-		letterSpacing: 0.8,
-		textTransform: 'uppercase',
-		marginBottom: 10,
-	},
-	suggestionsHeader: {
+	labelRow: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		gap: 6,
 		marginBottom: 10,
 	},
+	sectionLabel: {
+		fontSize: 11,
+		fontWeight: '800',
+		color: C.textMuted,
+		letterSpacing: 0.8,
+		textTransform: 'uppercase',
+	},
 
-	// Image card
-	imageCard: {
-		height: 200,
-		borderRadius: 16,
+	// ── Main preview ──────────────────────────────────────────────────────────
+	previewContainer: {
+		borderRadius: 18,
 		overflow: 'hidden',
 		backgroundColor: C.surface,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
+		elevation: 5,
+		shadowColor: C.primary,
+		shadowOffset: { width: 0, height: 4 },
+		shadowOpacity: 0.2,
+		shadowRadius: 12,
 	},
-	sourceImage: {
+	mainPreview: {
 		width: '100%',
-		height: '100%',
+		height: 340,
 	},
-	imagePlaceholder: {
-		flex: 1,
-		justifyContent: 'center',
+	subjectBadge: {
+		position: 'absolute',
+		top: 14,
+		left: 14,
+		flexDirection: 'row',
 		alignItems: 'center',
-		gap: 10,
+		paddingHorizontal: 12,
+		paddingVertical: 7,
+		borderRadius: 20,
+		overflow: 'hidden',
+		gap: 6,
 	},
-	placeholderText: {
-		color: C.textDim,
-		fontSize: 13,
-	},
-	maskOverlay: {
-		...StyleSheet.absoluteFillObject,
-		justifyContent: 'flex-end',
-		padding: 12,
-	},
-	maskBadge: {
-		backgroundColor: 'rgba(8,8,16,0.75)',
-		borderRadius: 8,
-		paddingHorizontal: 10,
-		paddingVertical: 5,
-		alignSelf: 'center',
-	},
-	maskBadgeText: {
-		color: C.textMuted,
+	subjectBadgeText: {
+		color: C.white,
 		fontSize: 11,
-		textAlign: 'center',
+		fontWeight: '700',
 	},
 
-	// Prompt
+	// ── Prompt card ───────────────────────────────────────────────────────────
 	promptCard: {
 		flexDirection: 'row',
 		alignItems: 'flex-start',
@@ -487,8 +549,9 @@ const styles = StyleSheet.create({
 		backgroundColor: C.surface,
 		borderRadius: 14,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 		padding: 14,
+		minHeight: 90,
 	},
 	promptInput: {
 		flex: 1,
@@ -511,7 +574,7 @@ const styles = StyleSheet.create({
 		marginTop: 6,
 	},
 
-	// Chips
+	// ── Chips ─────────────────────────────────────────────────────────────────
 	chipsWrap: {
 		flexDirection: 'row',
 		flexWrap: 'wrap',
@@ -534,79 +597,123 @@ const styles = StyleSheet.create({
 		fontWeight: '600',
 	},
 
-	// Generate
-	generateWrap: {
-		marginBottom: 24,
-		gap: 12,
-	},
-	generateBtn: {
+	// ── Toggle card ───────────────────────────────────────────────────────────
+	toggleCard: {
+		flexDirection: 'row',
+		justifyContent: 'space-between',
+		alignItems: 'center',
+		backgroundColor: C.surface,
+		padding: 16,
 		borderRadius: 16,
-		overflow: 'hidden',
+		marginBottom: 24,
+		borderWidth: 1,
+		borderColor: C.border,
 	},
-	generateBtnDisabled: {
-		opacity: 0.55,
-	},
-	generateBtnGradient: {
+	toggleLeft: {
 		flexDirection: 'row',
 		alignItems: 'center',
+		gap: 14,
+	},
+	iconCircle: {
+		width: 40,
+		height: 40,
+		borderRadius: 20,
+		backgroundColor: `${C.primaryMid}1A`,
 		justifyContent: 'center',
-		gap: 10,
-		height: 56,
+		alignItems: 'center',
+		borderWidth: 1,
+		borderColor: `${C.primaryMid}30`,
 	},
-	generateBtnText: {
-		color: `${C.white}80`,
-		fontSize: 16,
-		fontWeight: '800',
+	toggleLabel: {
+		fontSize: 15,
+		fontWeight: '700',
+		color: C.text,
 	},
-	generateHint: {
-		color: C.textDim,
+	toggleSub: {
 		fontSize: 12,
-		textAlign: 'center',
-		lineHeight: 18,
+		color: C.textMuted,
+		marginTop: 2,
 	},
 
-	// How it works
-	howItWorksCard: {
-		backgroundColor: C.surface,
-		borderRadius: 16,
-		borderWidth: 1,
-		borderColor: '#1E1E30',
-		padding: 20,
-		gap: 14,
-		marginBottom: 8,
-	},
-	howTitle: {
-		color: C.textMuted,
-		fontSize: 13,
-		fontWeight: '700',
-		letterSpacing: 0.3,
-		marginBottom: 2,
-	},
-	howRow: {
+	// ── Variations ────────────────────────────────────────────────────────────
+	variationRow: {
 		flexDirection: 'row',
-		alignItems: 'flex-start',
-		gap: 12,
+		gap: 10,
+		flexWrap: 'wrap',
 	},
-	howStep: {
-		width: 22,
-		height: 22,
-		borderRadius: 11,
-		backgroundColor: `${C.primaryMid}20`,
+	variationThumb: {
+		width: 68,
+		height: 68,
+		borderRadius: 14,
+		overflow: 'hidden',
+		borderWidth: 2,
+		borderColor: 'transparent',
+	},
+	variationThumbActive: {
+		borderColor: C.primaryMid,
+	},
+	variationImg: {
+		width: '100%',
+		height: '100%',
+	},
+	addVariation: {
+		width: 68,
+		height: 68,
+		borderRadius: 14,
+		backgroundColor: C.surfaceHigh,
 		borderWidth: 1,
-		borderColor: `${C.primaryMid}40`,
+		borderColor: C.border,
 		justifyContent: 'center',
 		alignItems: 'center',
-		marginTop: 1,
 	},
-	howStepText: {
-		color: C.primaryMid,
-		fontSize: 11,
-		fontWeight: '800',
+
+	// ── Sticky footer ─────────────────────────────────────────────────────────
+	footer: {
+		position: 'absolute',
+		bottom: 0,
+		left: 0,
+		right: 0,
+		flexDirection: 'row',
+		paddingHorizontal: 20,
+		paddingTop: 14,
+		backgroundColor: `${C.surface}F5`,
+		borderTopWidth: StyleSheet.hairlineWidth,
+		borderTopColor: C.border,
+		gap: 12,
 	},
-	howText: {
+	cancelBtn: {
 		flex: 1,
-		color: C.textMuted,
-		fontSize: 13,
-		lineHeight: 19,
+		height: 52,
+		borderRadius: 26,
+		borderWidth: 1,
+		borderColor: C.border,
+		justifyContent: 'center',
+		alignItems: 'center',
+		backgroundColor: C.surfaceHigh,
+	},
+	cancelBtnText: {
+		fontSize: 15,
+		fontWeight: '700',
+		color: C.text,
+	},
+	regenerateBtn: {
+		flex: 2,
+		height: 52,
+		borderRadius: 26,
+		flexDirection: 'row',
+		justifyContent: 'center',
+		alignItems: 'center',
+		gap: 9,
+		backgroundColor: C.primaryMid,
+		elevation: 4,
+		shadowColor: C.primary,
+		shadowOffset: { width: 0, height: 4 },
+		shadowOpacity: 0.4,
+		shadowRadius: 8,
+	},
+	regenerateBtnText: {
+		fontSize: 15,
+		fontWeight: '700',
+		color: C.white,
 	},
 })

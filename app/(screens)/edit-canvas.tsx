@@ -33,12 +33,16 @@ import {
 	ActivityIndicator,
 	Alert,
 	Dimensions,
+	KeyboardAvoidingView,
+	Platform,
 	Pressable,
 	StyleSheet,
 	Text,
+	TextInput,
 	View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import Slider from '@react-native-community/slider'
 import { router, useLocalSearchParams } from 'expo-router'
 import { Image } from 'expo-image'
 import Animated, {
@@ -64,6 +68,9 @@ import {
 	Cpu,
 	Image as ImageIcon,
 	RefreshCw,
+	Redo2,
+	Undo2,
+	Wand2,
 	Zap,
 	ArrowRight,
 	Brush,
@@ -339,6 +346,97 @@ const BottomActions: React.FC<ActionsProps> = React.memo(
 )
 BottomActions.displayName = 'BottomActions'
 
+// — Controls panel — slider + AI prompt; shown in all states ─────────────────
+
+interface ControlsPanelProps {
+	intensity: number
+	onIntensityChange: (v: number) => void
+	prompt: string
+	onPromptChange: (v: string) => void
+	isGenerating: boolean
+	onGenerate: () => void
+}
+
+const ControlsPanel: React.FC<ControlsPanelProps> = React.memo(
+	({
+		intensity,
+		onIntensityChange,
+		prompt,
+		onPromptChange,
+		isGenerating,
+		onGenerate,
+	}) => (
+		<View style={styles.controlsSection}>
+			{/* Style intensity slider */}
+			<View style={styles.sliderContainer}>
+				<View style={styles.sliderLabelRow}>
+					<Text style={styles.sliderLabel}>Style Intensity</Text>
+					<Text style={styles.sliderValue}>
+						{Math.round(intensity * 100)}%
+					</Text>
+				</View>
+				<Slider
+					style={styles.slider}
+					minimumValue={0}
+					maximumValue={1}
+					value={intensity}
+					onValueChange={onIntensityChange}
+					minimumTrackTintColor={C.primaryMid}
+					maximumTrackTintColor={C.border}
+					thumbTintColor={C.primaryMid}
+				/>
+			</View>
+
+			{/* AI prompt input */}
+			<View style={styles.inputWrapper}>
+				<Wand2
+					size={20}
+					color={C.primaryMid}
+					style={styles.inputIcon}
+				/>
+				<TextInput
+					style={styles.textInput}
+					value={prompt}
+					onChangeText={onPromptChange}
+					placeholder="e.g. A cyberpunk city at night..."
+					placeholderTextColor={C.textMuted}
+					onSubmitEditing={onGenerate}
+					returnKeyType="go"
+				/>
+				{isGenerating ? (
+					<ActivityIndicator size="small" color={C.primaryMid} />
+				) : (
+					<Pressable
+						onPress={onGenerate}
+						accessibilityRole="button"
+						accessibilityLabel="Generate AI background"
+						hitSlop={8}
+					>
+						<Text style={styles.generateBtnText}>Gen</Text>
+					</Pressable>
+				)}
+			</View>
+
+			{/* Generating status overlay pill */}
+			{isGenerating && (
+				<View style={styles.generatingBanner}>
+					<ActivityIndicator size="small" color={C.primaryMid} />
+					<View>
+						<Text style={styles.generatingText}>
+							AI is painting your background…
+						</Text>
+						<Text style={styles.generatingSubtext}>
+							You can navigate away. We&apos;ll notify you when
+							done.
+						</Text>
+					</View>
+				</View>
+			)}
+		</View>
+	)
+)
+ControlsPanel.displayName = 'ControlsPanel'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DONE-STATE: INTERACTIVE ALPHA-MASK BRUSH CANVAS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,6 +677,24 @@ export default function EditCanvasScreen(): React.JSX.Element {
 	// — Export loading state for header button ————————————————————————————————
 	const [isExporting, setIsExporting] = useState(false)
 
+	// — Old-canvas UI states ——————————————————————————————————————————————————
+	const [intensity, setIntensity] = useState(0.75)
+	const [prompt, setPrompt] = useState('')
+	const [isGenerating, setIsGenerating] = useState(false)
+
+	const handleGenerateBackground = useCallback(() => {
+		if (!prompt.trim()) return
+		setIsGenerating(true)
+		// Mock pipeline — replace with real backend call to StyleJobService
+		setTimeout(() => {
+			setIsGenerating(false)
+			Alert.alert(
+				'Background generated',
+				'AI background applied successfully.'
+			)
+		}, 10_000)
+	}, [prompt])
+
 	// — Handlers ——————————————————————————————————————————————————————————————
 	const handleProcessNow = useCallback(() => {
 		if (!jobId) return
@@ -736,7 +852,10 @@ export default function EditCanvasScreen(): React.JSX.Element {
 
 	// — Render ————————————————————————————————————————————————————————————————
 	return (
-		<View style={[styles.screen, { backgroundColor: C.bg }]}>
+		<KeyboardAvoidingView
+			style={[styles.screen, { backgroundColor: C.bg }]}
+			behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+		>
 			{/* ── Header ────────────────────────────────────────────────────── */}
 			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
 				<Pressable
@@ -899,7 +1018,54 @@ export default function EditCanvasScreen(): React.JSX.Element {
 					</View>
 				</View>
 			)}
-		</View>
+
+			{/* ── Controls: style intensity slider + AI prompt (all states) ─── */}
+			<ControlsPanel
+				intensity={intensity}
+				onIntensityChange={setIntensity}
+				prompt={prompt}
+				onPromptChange={setPrompt}
+				isGenerating={isGenerating}
+				onGenerate={handleGenerateBackground}
+			/>
+
+			{/* ── History + BG Gallery footer row (all states) ──────────────── */}
+			<View
+				style={[
+					styles.historyRow,
+					{ paddingBottom: insets.bottom + 14 },
+				]}
+			>
+				<View style={styles.historyActions}>
+					<Pressable
+						style={styles.circleBtn}
+						accessibilityRole="button"
+						accessibilityLabel="Undo"
+						hitSlop={8}
+					>
+						<Undo2 size={22} color={C.text} strokeWidth={1.8} />
+					</Pressable>
+					<Pressable
+						style={styles.circleBtn}
+						accessibilityRole="button"
+						accessibilityLabel="Redo"
+						hitSlop={8}
+					>
+						<Redo2 size={22} color={C.text} strokeWidth={1.8} />
+					</Pressable>
+				</View>
+
+				<Pressable
+					style={styles.backgroundBtn}
+					onPress={handleBGEdit}
+					accessibilityRole="button"
+					accessibilityLabel="Open background gallery"
+				>
+					<ImageIcon color={C.white} size={18} strokeWidth={1.8} />
+					<Text style={styles.backgroundBtnText}>BG Gallery</Text>
+				</Pressable>
+			</View>
+		</KeyboardAvoidingView>
 	)
 }
 
@@ -1204,4 +1370,121 @@ const styles = StyleSheet.create({
 	},
 
 	surfaceHigh: { backgroundColor: C.surfaceHigh },
+
+	// ── Controls section (slider + AI prompt) ────────────────────────────────
+	controlsSection: {
+		backgroundColor: C.surface,
+		borderTopWidth: StyleSheet.hairlineWidth,
+		borderTopColor: C.border,
+		paddingHorizontal: 20,
+		paddingTop: 18,
+		paddingBottom: 10,
+	},
+	sliderContainer: {
+		marginBottom: 18,
+	},
+	sliderLabelRow: {
+		flexDirection: 'row',
+		justifyContent: 'space-between',
+		marginBottom: 6,
+	},
+	sliderLabel: {
+		color: C.text,
+		fontSize: 14,
+		fontWeight: '600',
+	},
+	sliderValue: {
+		color: C.primaryMid,
+		fontSize: 14,
+		fontWeight: '700',
+	},
+	slider: {
+		width: '100%',
+		height: 36,
+	},
+	inputWrapper: {
+		backgroundColor: C.surfaceHigh,
+		borderRadius: 12,
+		flexDirection: 'row',
+		alignItems: 'center',
+		paddingHorizontal: 14,
+		height: 52,
+		borderWidth: 1,
+		borderColor: C.border,
+	},
+	inputIcon: {
+		marginRight: 10,
+	},
+	textInput: {
+		flex: 1,
+		color: C.text,
+		fontSize: 14,
+		fontWeight: '500',
+	},
+	generateBtnText: {
+		color: C.primaryMid,
+		fontWeight: '700',
+		fontSize: 15,
+	},
+	generatingBanner: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 12,
+		marginTop: 12,
+		backgroundColor: C.surfaceHigh,
+		borderRadius: 12,
+		borderWidth: 1,
+		borderColor: C.border,
+		padding: 12,
+	},
+	generatingText: {
+		color: C.text,
+		fontSize: 13,
+		fontWeight: '600',
+	},
+	generatingSubtext: {
+		color: C.textMuted,
+		fontSize: 11,
+		marginTop: 2,
+	},
+
+	// ── History + BG Gallery footer row ──────────────────────────────────────
+	historyRow: {
+		flexDirection: 'row',
+		justifyContent: 'space-between',
+		alignItems: 'center',
+		backgroundColor: C.surface,
+		borderTopWidth: StyleSheet.hairlineWidth,
+		borderTopColor: C.border,
+		paddingHorizontal: 20,
+		paddingTop: 14,
+	},
+	historyActions: {
+		flexDirection: 'row',
+		gap: 12,
+	},
+	circleBtn: {
+		width: 48,
+		height: 48,
+		borderRadius: 24,
+		backgroundColor: C.surfaceHigh,
+		borderWidth: 1,
+		borderColor: C.border,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	backgroundBtn: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		backgroundColor: C.primaryMid,
+		paddingHorizontal: 20,
+		height: 48,
+		borderRadius: 24,
+		gap: 8,
+	},
+	backgroundBtnText: {
+		color: C.white,
+		fontWeight: '700',
+		fontSize: 14,
+	},
 })

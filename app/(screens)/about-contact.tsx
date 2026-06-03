@@ -53,29 +53,24 @@ import {
 // — Context & Services ————————————————————————————————————————————————————————
 import { useContact } from '@/context/ContactContext'
 
-// — Design tokens —————————————————————————————————————————————————————————————
-const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	accent: '#C026D3',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	success: '#10B981',
-	error: '#DC2626',
-	white: '#FFFFFF',
-} as const
+// — Design tokens & App constants ————————————————————————————————————————————
+import { APP_INFO, COLORS } from '@/shared/utils/constants'
 
-// — App constants (mirrors src/shared/utils/constants.ts) ————————————————————
-const APP_INFO = {
-	name: 'ArtLens',
-	version: '1.3.0',
-	supportEmail: 'support@artlens.app',
-	xHandle: '@artlensapp',
+// Alias for ergonomic local use — maps to the light-theme tokens in constants.ts
+const C = {
+	bg: COLORS.white,
+	surface: COLORS.cardBg,
+	surfaceHigh: COLORS.background,
+	border: COLORS.border,
+	primary: COLORS.primary,
+	primaryMid: COLORS.primaryLight,
+	accent: COLORS.accent,
+	text: COLORS.textMain,
+	textMuted: COLORS.textGray,
+	textDim: COLORS.textGray,
+	success: COLORS.success,
+	error: '#DC2626',
+	white: COLORS.white,
 } as const
 
 // — Team data ————————————————————————————————————————————————————————————————
@@ -516,7 +511,9 @@ export default function AboutContactScreen(): React.JSX.Element {
 				<View style={styles.footer}>
 					<View style={styles.awardRow}>
 						<Award color={C.textDim} size={13} strokeWidth={1.5} />
-						<Text style={styles.footerText}>Best AI App 2024</Text>
+						<Text style={styles.footerText}>
+							{APP_INFO.awardBadge}
+						</Text>
 					</View>
 					<Text style={styles.footerSub}>
 						v{APP_INFO.version} · Built with ❤️ by {APP_INFO.name}{' '}
@@ -539,7 +536,7 @@ const styles = StyleSheet.create({
 		paddingHorizontal: 12,
 		paddingBottom: 10,
 		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: '#1E1E30',
+		borderBottomColor: C.border,
 	},
 	headerBtn: {
 		width: 40,
@@ -607,7 +604,7 @@ const styles = StyleSheet.create({
 		backgroundColor: C.surface,
 		borderRadius: 16,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 		padding: 14,
 		alignItems: 'center',
 		gap: 6,
@@ -628,7 +625,7 @@ const styles = StyleSheet.create({
 	// Divider
 	divider: {
 		height: StyleSheet.hairlineWidth,
-		backgroundColor: '#1E1E30',
+		backgroundColor: C.border,
 		marginVertical: 20,
 	},
 
@@ -652,7 +649,7 @@ const styles = StyleSheet.create({
 		backgroundColor: C.surface,
 		borderRadius: 16,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 		padding: 18,
 	},
 	visionText: {
@@ -677,7 +674,7 @@ const styles = StyleSheet.create({
 		height: 64,
 		borderRadius: 32,
 		borderWidth: 2,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 	},
 	teamName: {
 		color: C.text,
@@ -735,7 +732,7 @@ const styles = StyleSheet.create({
 		backgroundColor: C.surface,
 		borderRadius: 14,
 		borderWidth: 1,
-		borderColor: '#1E1E30',
+		borderColor: C.border,
 		paddingHorizontal: 16,
 		paddingVertical: 14,
 		color: C.text,

@@ -2,8 +2,9 @@
  * ArtLens — HomeScreen (v2 — Full Spec Implementation)
  *
  * Features:
- *  - Branded premium hero header
- *  - Open Camera + Upload Photo quick-action row
+ *  - Branded premium hero header (UI from index_old.tsx)
+ *  - ImageBackground hero with Open Camera + Gallery quick-action row
+ *  - Features row (Live AI, Background, Magic Edit)
  *  - Trending styles horizontal carousel with download status indicators
  *  - Style card selection → setSelectedStyleId + pickImage() orchestration
  *  - Floating animated compute monitor (PROCESSING/QUEUED jobs)
@@ -17,10 +18,12 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react'
 import {
 	FlatList,
+	ImageBackground,
 	Pressable,
 	ScrollView,
 	StyleSheet,
 	Text,
+	TouchableOpacity,
 	View,
 	type ListRenderItem,
 } from 'react-native'
@@ -40,8 +43,6 @@ import Animated, {
 	FadeOutDown,
 } from 'react-native-reanimated'
 import {
-	Camera,
-	Upload,
 	ChevronRight,
 	Sparkles,
 	Zap,
@@ -49,6 +50,7 @@ import {
 	Download,
 	CheckCircle2,
 	Image as ImageIcon,
+	Wand2,
 	X,
 } from 'lucide-react-native'
 
@@ -63,37 +65,17 @@ import { useImageSelection } from '@/features/upload/hooks/useImageSelection'
 import type { StyleModel } from '@/types'
 
 import { createTracker } from '@/shared/utils/logger'
+import { COLORS } from '@/shared/utils/constants'
 
 const tracker = createTracker('HomeScreen')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DESIGN TOKENS
+// CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	primaryGlow: '#9F67FF',
-	accent: '#C026D3',
-	gold: '#D97706',
-	goldLight: '#F59E0B',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	success: '#059669',
-	downloaded: '#10B981',
-	error: '#EF4444',
-	inactive: '#52526A',
-} as const
-
-const STYLE_CARD_W = 140
-const STYLE_CARD_H = 186
-const H_PADDING = 20
-const GAP_SIZE = 12
+const STYLE_CARD_W = 180
+const STYLE_CARD_H = 240
+const GAP_SIZE = 15
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUB-COMPONENTS
@@ -168,7 +150,11 @@ const ComputeMonitor = React.memo<ComputeMonitorProps>(({ count, onPress }) => {
 				<Text style={styles.computeMonitorText}>
 					Transforming {count} image{count === 1 ? '' : 's'}…
 				</Text>
-				<ChevronRight color={C.primaryGlow} size={14} strokeWidth={2} />
+				<ChevronRight
+					color={COLORS.primary}
+					size={14}
+					strokeWidth={2}
+				/>
 			</Pressable>
 		</Animated.View>
 	)
@@ -188,7 +174,7 @@ const ErrorBanner = React.memo<ErrorBannerProps>(({ message, onDismiss }) => (
 		exiting={FadeOutDown.duration(200)}
 	>
 		<View style={styles.errorBannerContent}>
-			<Zap color={C.error} size={16} strokeWidth={2} />
+			<Zap color="#EF4444" size={16} strokeWidth={2} />
 			<Text style={styles.errorBannerText} numberOfLines={2}>
 				{message}
 			</Text>
@@ -200,55 +186,25 @@ const ErrorBanner = React.memo<ErrorBannerProps>(({ message, onDismiss }) => (
 			accessibilityRole="button"
 			accessibilityLabel="Dismiss error"
 		>
-			<X color={C.textMuted} size={14} strokeWidth={2} />
+			<X color={COLORS.textGray} size={14} strokeWidth={2} />
 		</Pressable>
 	</Animated.View>
 ))
 ErrorBanner.displayName = 'ErrorBanner'
 
-/** Quick-action row card */
-interface QuickActionProps {
-	icon: React.ReactNode
+/** Feature item in the features row */
+interface FeatureItemProps {
 	label: string
-	sub: string
-	onPress: () => void
-	loading?: boolean
-	tint?: string
+	icon: React.ReactNode
 }
 
-const QuickAction = React.memo<QuickActionProps>(
-	({ icon, label, sub, onPress, loading = false, tint = C.primary }) => (
-		<Pressable
-			onPress={onPress}
-			disabled={loading}
-			style={({ pressed }) => [
-				styles.quickAction,
-				pressed && styles.quickActionPressed,
-				loading && { opacity: 0.6 },
-			]}
-			android_ripple={{ color: `${tint}33`, borderless: false }}
-			accessibilityRole="button"
-			accessibilityLabel={label}
-		>
-			<View
-				style={[
-					styles.quickActionIcon,
-					{ backgroundColor: `${tint}20`, borderColor: `${tint}40` },
-				]}
-			>
-				{icon}
-			</View>
-			<View style={styles.quickActionText}>
-				<Text style={styles.quickActionLabel}>{label}</Text>
-				<Text style={styles.quickActionSub}>
-					{loading ? 'Opening…' : sub}
-				</Text>
-			</View>
-			<ChevronRight color={C.textDim} size={16} strokeWidth={1.5} />
-		</Pressable>
-	)
-)
-QuickAction.displayName = 'QuickAction'
+const FeatureItem = React.memo<FeatureItemProps>(({ label, icon }) => (
+	<View style={styles.featureItem}>
+		<View style={styles.featureCircle}>{icon}</View>
+		<Text style={styles.featureLabel}>{label}</Text>
+	</View>
+))
+FeatureItem.displayName = 'FeatureItem'
 
 /** Trending style card with download status indicator */
 interface StyleCardProps {
@@ -262,59 +218,53 @@ const StyleCard = React.memo<StyleCardProps>(({ item, onPress }) => {
 	const isDownloading = item.downloadStatus === 'downloading'
 
 	return (
-		<Pressable
+		<TouchableOpacity
 			onPress={handlePress}
-			style={({ pressed }) => [
-				styles.styleCard,
-				pressed && styles.styleCardPressed,
-			]}
+			style={styles.cardContainer}
+			activeOpacity={0.9}
 			accessibilityRole="button"
 			accessibilityLabel={`${item.name} style — ${isDownloaded ? 'ready' : 'tap to download'}`}
 		>
-			{/* Thumbnail */}
 			<Image
 				source={{ uri: item.thumbnailUrl }}
-				style={styles.styleCardImage}
+				style={styles.cardImage}
 				contentFit="cover"
 				cachePolicy="disk"
 				transition={300}
 				accessibilityLabel={`${item.name} art style preview`}
 			/>
 
-			{/* Bottom gradient overlay */}
-			<LinearGradient
-				colors={['transparent', 'rgba(0,0,0,0.88)']}
-				style={StyleSheet.absoluteFill}
-				start={{ x: 0, y: 0.35 }}
-				end={{ x: 0, y: 1 }}
-			/>
-
 			{/* Download status badge — top-right corner */}
-			<View style={styles.styleCardBadge}>
+			<View style={styles.cardBadge}>
 				{isDownloaded ? (
 					<CheckCircle2
-						color={C.downloaded}
+						color="#10B981"
 						size={14}
-						fill={`${C.downloaded}30`}
+						fill="#10B98130"
 						strokeWidth={2}
 					/>
 				) : isDownloading ? (
-					<Download color={C.primaryGlow} size={14} strokeWidth={2} />
+					<Download
+						color={COLORS.primary}
+						size={14}
+						strokeWidth={2}
+					/>
 				) : (
-					<Download color={C.inactive} size={14} strokeWidth={1.5} />
+					<Download
+						color={COLORS.textGray}
+						size={14}
+						strokeWidth={1.5}
+					/>
 				)}
 			</View>
 
-			{/* Name + size footer */}
-			<View style={styles.styleCardOverlay}>
-				<Text style={styles.styleCardName} numberOfLines={2}>
-					{item.name}
-				</Text>
+			<View style={styles.cardInfo}>
+				<Text style={styles.cardTitle}>{item.name}</Text>
 				{!isDownloaded && (
-					<Text style={styles.styleCardSize}>{item.fileSize}</Text>
+					<Text style={styles.cardTag}>{item.fileSize}</Text>
 				)}
 			</View>
-		</Pressable>
+		</TouchableOpacity>
 	)
 })
 StyleCard.displayName = 'StyleCard'
@@ -411,124 +361,116 @@ export default function HomeScreen(): React.JSX.Element {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	return (
-		<View style={[styles.screen, { backgroundColor: C.bg }]}>
+		<View style={styles.container}>
+			{/* Header */}
+			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
+				<View style={styles.logoRow}>
+					<View style={styles.logoBox}>
+						<Sparkles size={18} color="#FFF" />
+					</View>
+					<Text style={styles.logoText}>ArtLens</Text>
+				</View>
+				<TouchableOpacity
+					style={styles.profileBtn}
+					onPress={() => router.push('/settings')}
+					activeOpacity={0.7}
+				>
+					{activeJobCount > 0 ? (
+						<View style={styles.pendingBadge}>
+							<Text style={styles.pendingBadgeText}>
+								{activeJobCount}
+							</Text>
+						</View>
+					) : (
+						<View style={styles.profileCircle} />
+					)}
+				</TouchableOpacity>
+			</View>
+
 			<ScrollView
 				ref={scrollRef}
-				style={styles.scroll}
+				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{
-						paddingTop: insets.top + 16,
-						paddingBottom: insets.bottom + 120,
-					},
+					{ paddingBottom: insets.bottom + 20 },
 				]}
-				showsVerticalScrollIndicator={false}
 			>
 				{/* ── Error Banner ─────────────────────────────────────────────── */}
 				{error && (
 					<ErrorBanner message={error} onDismiss={clearError} />
 				)}
 
-				{/* ── Header ──────────────────────────────────────────────────── */}
-				<View style={styles.header}>
-					<View>
-						<View style={styles.brandRow}>
-							<Sparkles
-								color={C.primaryMid}
-								size={17}
-								fill={`${C.primaryMid}35`}
-							/>
-							<Text style={styles.brandName}>ArtLens</Text>
-						</View>
-						<Text style={styles.heroHeadline}>
-							Turn every frame{'\n'}into fine art.
-						</Text>
-					</View>
-
-					{activeJobCount > 0 && (
-						<Pressable
-							onPress={handleComputeMonitorPress}
-							style={styles.pendingBadge}
-							accessibilityRole="button"
-							accessibilityLabel={`${activeJobCount} jobs processing, tap to view`}
+				{/* ── Hero Section ─────────────────────────────────────────────── */}
+				<View style={styles.heroContainer}>
+					<ImageBackground
+						source={{
+							uri: 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?q=80&w=1000',
+						}}
+						style={styles.heroImage}
+						imageStyle={{ borderRadius: 24 }}
+					>
+						<LinearGradient
+							colors={['transparent', 'rgba(0,0,0,0.9)']}
+							style={styles.gradient}
 						>
-							<Text style={styles.pendingBadgeText}>
-								{activeJobCount}
+							<Text style={styles.heroTitle}>
+								Turn Photos Into{'\n'}Art Instantly
 							</Text>
-						</Pressable>
-					)}
+							<Text style={styles.heroSubtitle}>
+								Create masterpieces with AI power
+							</Text>
+
+							<View style={styles.heroButtonRow}>
+								<TouchableOpacity
+									style={styles.primaryButton}
+									onPress={handleOpenCamera}
+								>
+									<Text style={styles.primaryButtonText}>
+										Open Camera
+									</Text>
+								</TouchableOpacity>
+
+								<TouchableOpacity
+									style={[
+										styles.secondaryButton,
+										isPicking && { opacity: 0.6 },
+									]}
+									onPress={handleUploadPhoto}
+									disabled={isPicking}
+								>
+									<ImageIcon size={20} color="#FFF" />
+								</TouchableOpacity>
+							</View>
+						</LinearGradient>
+					</ImageBackground>
 				</View>
 
-				{/* ── Hero gradient strip ─────────────────────────────────────── */}
-				<LinearGradient
-					colors={[`${C.primary}22`, `${C.accent}12`, 'transparent']}
-					style={styles.heroStrip}
-					start={{ x: 0, y: 0 }}
-					end={{ x: 1, y: 1 }}
-				>
-					<ImageIcon
-						color={`${C.primaryGlow}80`}
-						size={14}
-						strokeWidth={1.5}
+				{/* ── Features Row ─────────────────────────────────────────────── */}
+				<View style={styles.featuresRow}>
+					<FeatureItem
+						label="Live AI"
+						icon={<Sparkles size={20} color={COLORS.primary} />}
 					/>
-					<Text style={styles.heroSub}>
-						On-device AI · No cloud · No waiting
-					</Text>
-				</LinearGradient>
-
-				{/* ── Quick Actions ────────────────────────────────────────────── */}
-				<View style={[styles.section, styles.quickActions]}>
-					<QuickAction
-						icon={
-							<Camera
-								color={C.primaryGlow}
-								size={22}
-								strokeWidth={1.6}
-							/>
-						}
-						label="Open Camera"
-						sub="Live style preview"
-						onPress={handleOpenCamera}
-						tint={C.primary}
+					<FeatureItem
+						label="Background"
+						icon={<ImageIcon size={20} color={COLORS.primary} />}
 					/>
-					<View style={styles.quickActionDivider} />
-					<QuickAction
-						icon={
-							<Upload
-								color={C.goldLight}
-								size={22}
-								strokeWidth={1.6}
-							/>
-						}
-						label="Upload Photo"
-						sub="From your gallery"
-						onPress={handleUploadPhoto}
-						loading={isPicking}
-						tint={C.gold}
+					<FeatureItem
+						label="Magic Edit"
+						icon={<Wand2 size={20} color={COLORS.primary} />}
 					/>
 				</View>
 
-				{/* ── Trending Styles ──────────────────────────────────────────── */}
+				{/* ── Trending Styles Section ───────────────────────────────────── */}
 				{trendingStyles.length > 0 && (
-					<View style={styles.section}>
+					<>
 						<View style={styles.sectionHeader}>
 							<Text style={styles.sectionTitle}>
-								Trending styles
+								Trending Styles
 							</Text>
-							<Pressable
-								onPress={handleSeeAllStyles}
-								style={styles.seeAll}
-								accessibilityRole="button"
-								accessibilityLabel="See all styles"
-								hitSlop={12}
-							>
-								<Text style={styles.seeAllText}>See all</Text>
-								<ChevronRight
-									color={C.primaryMid}
-									size={14}
-									strokeWidth={2}
-								/>
-							</Pressable>
+							<TouchableOpacity onPress={handleSeeAllStyles}>
+								<Text style={styles.seeAll}>See All</Text>
+							</TouchableOpacity>
 						</View>
 
 						<FlatList
@@ -537,9 +479,8 @@ export default function HomeScreen(): React.JSX.Element {
 							keyExtractor={keyExtractor}
 							horizontal
 							showsHorizontalScrollIndicator={false}
-							contentContainerStyle={styles.stylesListContent}
+							contentContainerStyle={styles.styleScroll}
 							ItemSeparatorComponent={renderSeparator}
-							// FIXED: Sized to individual inner component dimension logic maps
 							getItemLayout={(_, i) => ({
 								length: STYLE_CARD_W,
 								offset: (STYLE_CARD_W + GAP_SIZE) * i,
@@ -550,13 +491,17 @@ export default function HomeScreen(): React.JSX.Element {
 							removeClippedSubviews
 							scrollEventThrottle={16}
 						/>
-					</View>
+					</>
 				)}
 
 				{/* ── Empty catalog prompt ─────────────────────────────────────── */}
 				{catalog.length === 0 && (
 					<View style={styles.emptyState}>
-						<Layers color={C.textDim} size={40} strokeWidth={1.2} />
+						<Layers
+							color={COLORS.textGray}
+							size={40}
+							strokeWidth={1.2}
+						/>
 						<Text style={styles.emptyTitle}>No styles yet</Text>
 						<Text style={styles.emptySub}>
 							Go to Styles to download your first art style.
@@ -590,30 +535,217 @@ export default function HomeScreen(): React.JSX.Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-	screen: {
+	container: { flex: 1, backgroundColor: '#FFF' },
+	scrollContent: { paddingBottom: 20 },
+
+	// ── Header ─────────────────────────────────────────────────────────────────
+	header: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		justifyContent: 'space-between',
+		paddingHorizontal: 20,
+		paddingVertical: 15,
+	},
+	logoRow: { flexDirection: 'row', alignItems: 'center' },
+	logoBox: {
+		width: 36,
+		height: 36,
+		backgroundColor: COLORS.primary,
+		borderRadius: 10,
+		marginRight: 12,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	logoText: {
+		fontSize: 24,
+		fontWeight: '900',
+		color: COLORS.textMain,
+		letterSpacing: -0.5,
+	},
+	profileBtn: {
+		padding: 4,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	profileCircle: {
+		width: 36,
+		height: 36,
+		borderRadius: 18,
+		backgroundColor: COLORS.border,
+	},
+	pendingBadge: {
+		minWidth: 36,
+		height: 36,
+		borderRadius: 18,
+		backgroundColor: COLORS.primary,
+		justifyContent: 'center',
+		alignItems: 'center',
+		paddingHorizontal: 6,
+	},
+	pendingBadgeText: {
+		color: '#FFF',
+		fontSize: 14,
+		fontWeight: '700',
+	},
+
+	// ── Hero ───────────────────────────────────────────────────────────────────
+	heroContainer: { paddingHorizontal: 15, height: 420, marginBottom: 10 },
+	heroImage: { flex: 1, justifyContent: 'flex-end', overflow: 'hidden' },
+	gradient: {
+		padding: 24,
+		paddingBottom: 30,
+		alignItems: 'center',
+	},
+	heroTitle: {
+		color: '#FFF',
+		fontSize: 36,
+		fontWeight: '900',
+		textAlign: 'center',
+		marginBottom: 8,
+		lineHeight: 40,
+	},
+	heroSubtitle: {
+		color: 'rgba(255,255,255,0.7)',
+		fontSize: 16,
+		marginBottom: 25,
+		fontWeight: '500',
+	},
+	heroButtonRow: { flexDirection: 'row', gap: 12, width: '100%' },
+	primaryButton: {
+		backgroundColor: COLORS.white,
 		flex: 1,
+		padding: 18,
+		borderRadius: 20,
+		alignItems: 'center',
+		shadowColor: '#000',
+		shadowOpacity: 0.2,
+		shadowRadius: 10,
+		elevation: 5,
 	},
-	scroll: {
-		flex: 1,
+	primaryButtonText: { fontWeight: '800', fontSize: 16, color: '#000' },
+	secondaryButton: {
+		backgroundColor: 'rgba(255,255,255,0.2)',
+		width: 60,
+		borderRadius: 20,
+		borderWidth: 1,
+		borderColor: 'rgba(255,255,255,0.3)',
+		justifyContent: 'center',
+		alignItems: 'center',
 	},
-	scrollContent: {
-		paddingHorizontal: H_PADDING,
+
+	// ── Features Row ───────────────────────────────────────────────────────────
+	featuresRow: {
+		flexDirection: 'row',
+		justifyContent: 'space-around',
+		paddingVertical: 25,
+		backgroundColor: COLORS.white,
+		marginHorizontal: 15,
+		borderRadius: 20,
+		marginTop: -30, // Overlap effect
+		elevation: 2,
+		shadowColor: '#000',
+		shadowOpacity: 0.05,
+		shadowRadius: 5,
 	},
-	separator: {
-		width: GAP_SIZE,
+	featureItem: { alignItems: 'center', width: 90 },
+	featureCircle: {
+		width: 50,
+		height: 50,
+		borderRadius: 15,
+		backgroundColor: '#F0EDFF',
+		marginBottom: 8,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	featureLabel: {
+		fontSize: 11,
+		fontWeight: '700',
+		color: COLORS.textMain,
+		textAlign: 'center',
+	},
+
+	// ── Section Header ─────────────────────────────────────────────────────────
+	sectionHeader: {
+		flexDirection: 'row',
+		justifyContent: 'space-between',
+		paddingHorizontal: 20,
+		marginTop: 30,
+		marginBottom: 15,
+		alignItems: 'center',
+	},
+	sectionTitle: { fontSize: 20, fontWeight: '800', color: COLORS.textMain },
+	seeAll: { color: COLORS.primary, fontWeight: '700', fontSize: 14 },
+
+	// ── Style Cards ────────────────────────────────────────────────────────────
+	styleScroll: { paddingLeft: 20, paddingRight: 20 },
+	separator: { width: GAP_SIZE },
+	cardContainer: {
+		width: STYLE_CARD_W,
+		backgroundColor: COLORS.white,
+		borderRadius: 20,
+		overflow: 'hidden',
+		borderWidth: 1,
+		borderColor: COLORS.border,
+	},
+	cardImage: { width: '100%', height: STYLE_CARD_H },
+	cardBadge: {
+		position: 'absolute',
+		top: 8,
+		right: 8,
+		width: 22,
+		height: 22,
+		borderRadius: 11,
+		backgroundColor: 'rgba(0,0,0,0.45)',
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+	cardInfo: { padding: 12 },
+	cardTitle: { fontSize: 16, fontWeight: '800', color: COLORS.textMain },
+	cardTag: { fontSize: 13, color: COLORS.textGray, marginTop: 2 },
+
+	// ── Empty State ────────────────────────────────────────────────────────────
+	emptyState: {
+		alignItems: 'center',
+		paddingTop: 40,
+		paddingHorizontal: 20,
+		gap: 12,
+	},
+	emptyTitle: {
+		color: COLORS.textMain,
+		fontSize: 18,
+		fontWeight: '700',
+	},
+	emptySub: {
+		color: COLORS.textGray,
+		fontSize: 14,
+		textAlign: 'center',
+		lineHeight: 20,
+	},
+	emptyButton: {
+		marginTop: 8,
+		backgroundColor: COLORS.primary,
+		borderRadius: 12,
+		paddingHorizontal: 24,
+		paddingVertical: 12,
+	},
+	emptyButtonText: {
+		color: '#FFF',
+		fontSize: 14,
+		fontWeight: '700',
 	},
 
 	// ── Error Banner ───────────────────────────────────────────────────────────
 	errorBanner: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: `${C.error}18`,
+		backgroundColor: '#EF444418',
 		borderWidth: 1,
-		borderColor: `${C.error}40`,
+		borderColor: '#EF444440',
 		borderRadius: 12,
 		paddingHorizontal: 14,
 		paddingVertical: 10,
-		marginBottom: 16,
+		marginHorizontal: 15,
+		marginBottom: 8,
 		gap: 10,
 	},
 	errorBannerContent: {
@@ -624,7 +756,7 @@ const styles = StyleSheet.create({
 	},
 	errorBannerText: {
 		flex: 1,
-		color: C.error,
+		color: '#EF4444',
 		fontSize: 13,
 		fontWeight: '500',
 		lineHeight: 18,
@@ -636,247 +768,26 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 	},
 
-	// ── Header ─────────────────────────────────────────────────────────────────
-	header: {
-		flexDirection: 'row',
-		justifyContent: 'space-between',
-		alignItems: 'flex-start',
-		marginBottom: 20,
-	},
-	brandRow: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 6,
-		marginBottom: 8,
-	},
-	brandName: {
-		color: C.primaryMid,
-		fontSize: 12,
-		fontWeight: '700',
-		letterSpacing: 2,
-		textTransform: 'uppercase',
-	},
-	heroHeadline: {
-		color: C.text,
-		fontSize: 30,
-		fontWeight: '800',
-		lineHeight: 36,
-		letterSpacing: -0.6,
-	},
-	pendingBadge: {
-		minWidth: 28,
-		height: 28,
-		borderRadius: 14,
-		backgroundColor: C.primaryMid,
-		justifyContent: 'center',
-		alignItems: 'center',
-		paddingHorizontal: 6,
-		marginTop: 4,
-	},
-	pendingBadgeText: {
-		color: C.text,
-		fontSize: 12,
-		fontWeight: '700',
-	},
-
-	// ── Hero strip ─────────────────────────────────────────────────────────────
-	heroStrip: {
-		borderRadius: 10,
-		borderWidth: 1,
-		borderColor: `${C.primary}25`,
-		paddingVertical: 10,
-		paddingHorizontal: 14,
-		marginBottom: 24,
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 8,
-		overflow: 'hidden',
-	},
-	heroSub: {
-		color: C.textMuted,
-		fontSize: 12,
-		fontWeight: '500',
-		letterSpacing: 0.2,
-	},
-
-	// ── Sections ───────────────────────────────────────────────────────────────
-	section: {
-		marginBottom: 28,
-	},
-	sectionHeader: {
-		flexDirection: 'row',
-		justifyContent: 'space-between',
-		alignItems: 'center',
-		marginBottom: 14,
-	},
-	sectionTitle: {
-		color: C.text,
-		fontSize: 18,
-		fontWeight: '700',
-		letterSpacing: -0.3,
-	},
-	seeAll: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 2,
-	},
-	seeAllText: {
-		color: C.primaryMid,
-		fontSize: 13,
-		fontWeight: '600',
-	},
-
-	// ── Quick Actions ──────────────────────────────────────────────────────────
-	quickActions: {
-		backgroundColor: C.surface,
-		borderRadius: 16,
-		borderWidth: 1,
-		borderColor: C.border,
-		overflow: 'hidden',
-	},
-	quickAction: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		paddingVertical: 16,
-		paddingHorizontal: 16,
-		gap: 14,
-	},
-	quickActionPressed: {
-		backgroundColor: C.surfaceHigh,
-	},
-	quickActionIcon: {
-		width: 44,
-		height: 44,
-		borderRadius: 12,
-		borderWidth: 1,
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	quickActionText: {
-		flex: 1,
-	},
-	quickActionLabel: {
-		color: C.text,
-		fontSize: 15,
-		fontWeight: '600',
-	},
-	quickActionSub: {
-		color: C.textMuted,
-		fontSize: 12,
-		marginTop: 2,
-	},
-	quickActionDivider: {
-		height: StyleSheet.hairlineWidth,
-		backgroundColor: C.border,
-		marginLeft: 74,
-	},
-
-	// ── Style Cards ────────────────────────────────────────────────────────────
-	stylesListContent: {
-		paddingRight: H_PADDING,
-	},
-	styleCard: {
-		width: STYLE_CARD_W,
-		height: STYLE_CARD_H,
-		borderRadius: 16,
-		overflow: 'hidden',
-		backgroundColor: C.surface,
-		borderWidth: 1,
-		borderColor: C.border,
-	},
-	styleCardPressed: {
-		opacity: 0.85,
-		transform: [{ scale: 0.97 }],
-	},
-	styleCardImage: {
-		position: 'absolute',
-		top: 0,
-		left: 0,
-		width: STYLE_CARD_W,
-		height: STYLE_CARD_H,
-	},
-	styleCardBadge: {
-		position: 'absolute',
-		top: 8,
-		right: 8,
-		width: 22,
-		height: 22,
-		borderRadius: 11,
-		backgroundColor: 'rgba(0,0,0,0.55)',
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	styleCardOverlay: {
-		position: 'absolute',
-		bottom: 0,
-		left: 0,
-		right: 0,
-		padding: 10,
-	},
-	styleCardName: {
-		color: C.text,
-		fontSize: 13,
-		fontWeight: '700',
-		letterSpacing: -0.2,
-		lineHeight: 17,
-	},
-	styleCardSize: {
-		color: C.textMuted,
-		fontSize: 10,
-		fontWeight: '500',
-		marginTop: 2,
-	},
-
-	// ── Empty state ────────────────────────────────────────────────────────────
-	emptyState: {
-		alignItems: 'center',
-		paddingTop: 40,
-		gap: 12,
-	},
-	emptyTitle: {
-		color: C.text,
-		fontSize: 18,
-		fontWeight: '700',
-	},
-	emptySub: {
-		color: C.textMuted,
-		fontSize: 14,
-		textAlign: 'center',
-		lineHeight: 20,
-	},
-	emptyButton: {
-		marginTop: 8,
-		backgroundColor: C.primaryMid,
-		borderRadius: 12,
-		paddingHorizontal: 24,
-		paddingVertical: 12,
-	},
-	emptyButtonText: {
-		color: C.text,
-		fontSize: 14,
-		fontWeight: '700',
-	},
-
 	// ── Floating Compute Monitor ───────────────────────────────────────────────
 	computeMonitor: {
 		position: 'absolute',
 		bottom: 100,
-		left: H_PADDING,
-		right: H_PADDING,
+		left: 20,
+		right: 20,
 	},
 	computeMonitorInner: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		gap: 10,
-		backgroundColor: C.surface,
+		backgroundColor: COLORS.white,
 		borderWidth: 1,
-		borderColor: `${C.primaryMid}50`,
+		borderColor: `${COLORS.primary}50`,
 		borderRadius: 28,
 		paddingVertical: 12,
 		paddingHorizontal: 18,
-		shadowColor: C.primary,
+		shadowColor: COLORS.primary,
 		shadowOffset: { width: 0, height: 4 },
-		shadowOpacity: 0.35,
+		shadowOpacity: 0.2,
 		shadowRadius: 12,
 		elevation: 8,
 	},
@@ -884,11 +795,11 @@ const styles = StyleSheet.create({
 		width: 8,
 		height: 8,
 		borderRadius: 4,
-		backgroundColor: C.primaryGlow,
+		backgroundColor: COLORS.primary,
 	},
 	computeMonitorText: {
 		flex: 1,
-		color: C.text,
+		color: COLORS.textMain,
 		fontSize: 13,
 		fontWeight: '600',
 	},

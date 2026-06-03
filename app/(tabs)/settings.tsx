@@ -30,9 +30,11 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
 	ActivityIndicator,
 	Alert,
+	Platform,
 	Pressable,
 	ScrollView,
 	StyleSheet,
+	Switch,
 	Text,
 	View,
 } from 'react-native'
@@ -41,6 +43,7 @@ import { router } from 'expo-router'
 import {
 	Check,
 	ChevronRight,
+	CloudOff,
 	Cpu,
 	FileImage,
 	HardDrive,
@@ -48,7 +51,10 @@ import {
 	MessageCircle,
 	RefreshCw,
 	Settings,
+	ShieldCheck,
+	Sparkles,
 	Trash2,
+	User,
 	Zap,
 } from 'lucide-react-native'
 import { useShallow } from 'zustand/shallow'
@@ -81,18 +87,18 @@ const tracker = createTracker('SettingsScreen')
 // ─────────────────────────────────────────────────────────────────────────────
 
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	downloaded: '#10B981',
-	warning: '#D97706',
-	error: '#DC2626',
+	bg: '#F8F9FB', // Soft off-white background
+	surface: '#FFFFFF', // Pure white main cards
+	surfaceHigh: '#F2F2F7', // Light high surface for chips and inputs
+	border: '#E5E5EA', // Subtle light gray border split line
+	primary: '#7B61FF', // Core brand purple
+	primaryMid: '#7B61FF', // Unified with core purple
+	text: '#1C1C1E', // Dark charcoal for high contrast text
+	textMuted: '#8E8E93', // Standard medium gray for subtext
+	textDim: '#AEAEB2', // Lighter muted text
+	downloaded: '#4CD964', // iOS success green
+	warning: '#FF9F0A', // Vibrant orange warning accent
+	error: '#FF7675', // Pastel coral/pink red tone
 	white: '#FFFFFF',
 } as const
 
@@ -334,8 +340,49 @@ const TierBadge: React.FC<{ tier: 1 | 2 }> = ({ tier }) => (
 	</View>
 )
 
+// ── Toggle Row ────────────────────────────────────────────────────────────────
+
+interface ToggleRowProps {
+	icon: React.ReactNode
+	label: string
+	subtitle?: string
+	value: boolean
+	onValueChange: (val: boolean) => void
+	noBorder?: boolean
+}
+
+const ToggleRow = React.memo<ToggleRowProps>(
+	({ icon, label, subtitle, value, onValueChange, noBorder }) => (
+		<View
+			style={[
+				styles.row,
+				styles.toggleRow,
+				!noBorder && styles.rowBorder,
+			]}
+		>
+			<View style={styles.rowLeft}>
+				<View style={styles.rowIcon}>{icon}</View>
+				<View style={styles.toggleLabelBlock}>
+					<Text style={styles.rowLabel}>{label}</Text>
+					{subtitle && (
+						<Text style={styles.toggleSubtitle}>{subtitle}</Text>
+					)}
+				</View>
+			</View>
+			<Switch
+				value={value}
+				onValueChange={onValueChange}
+				trackColor={{ false: C.border, true: C.primaryMid }}
+				thumbColor={Platform.OS === 'ios' ? undefined : C.white}
+			/>
+		</View>
+	)
+)
+ToggleRow.displayName = 'ToggleRow'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function SettingsScreen(): React.JSX.Element {
@@ -353,6 +400,11 @@ export default function SettingsScreen(): React.JSX.Element {
 	// store — it silently resolved to a no-op, so deleting a model never updated
 	// the displayed list until a full app restart.
 	const setCatalog = useModelStore((s) => s.updateCatalog)
+
+	// ── Old-screen toggle states ─────────────────────────────────────────────────
+	const [performanceMode, setPerformanceMode] = useState(true)
+	const [highQuality, setHighQuality] = useState(false)
+	const [offlineUsage, setOfflineUsage] = useState(false)
 
 	const [profile, setProfile] = useState<HardwareProfile | null>(null)
 	const isBenchmarking = useHardwareProfileStore((s) => s.isBenchmarking)
@@ -528,6 +580,70 @@ export default function SettingsScreen(): React.JSX.Element {
 				<Settings color={C.primaryMid} size={22} strokeWidth={1.6} />
 				<Text style={styles.pageTitle}>Settings</Text>
 			</View>
+
+			{/* ── 0. Account ───────────────────────────────────────────────── */}
+			<Section title="Account">
+				<Row
+					icon={
+						<User
+							color={C.primaryMid}
+							size={16}
+							strokeWidth={1.5}
+						/>
+					}
+					label="Pro Plan"
+					right={<Text style={styles.accountBadge}>Manage</Text>}
+					onPress={() => {}}
+					noBorder
+				/>
+			</Section>
+
+			{/* ── Performance & Quality ─────────────────────────────────────── */}
+			<Section title="Performance &amp; Quality">
+				<ToggleRow
+					icon={<Zap color="#FFD60A" size={16} strokeWidth={1.5} />}
+					label="Performance Mode"
+					subtitle="Prioritize speed over detail"
+					value={performanceMode}
+					onValueChange={setPerformanceMode}
+				/>
+				<ToggleRow
+					icon={
+						<Sparkles color="#FF9F0A" size={16} strokeWidth={1.5} />
+					}
+					label="Ultra Res Output"
+					subtitle="Render in 4K resolution"
+					value={highQuality}
+					onValueChange={setHighQuality}
+					noBorder
+				/>
+			</Section>
+
+			{/* ── Data & Storage (quick-access toggles) ────────────────────── */}
+			<Section title="Data &amp; Storage">
+				<ToggleRow
+					icon={
+						<CloudOff color="#30B0C7" size={16} strokeWidth={1.5} />
+					}
+					label="Offline Mode"
+					subtitle="Process without internet"
+					value={offlineUsage}
+					onValueChange={setOfflineUsage}
+				/>
+				<Row
+					icon={
+						<HardDrive
+							color={C.downloaded}
+							size={16}
+							strokeWidth={1.5}
+						/>
+					}
+					label="Clear Cache"
+					right={<Text style={styles.cacheLabel}>Used: 124 MB</Text>}
+					onPress={() => {}}
+					noBorder
+				/>
+			</Section>
 
 			{/* ── 1. Export Format ─────────────────────────────────────────────── */}
 			<Section title="Default export format">
@@ -709,6 +825,17 @@ export default function SettingsScreen(): React.JSX.Element {
 			<Section title="About">
 				<Row
 					icon={
+						<ShieldCheck
+							color={C.primaryMid}
+							size={16}
+							strokeWidth={1.5}
+						/>
+					}
+					label="Privacy Policy"
+					onPress={() => {}}
+				/>
+				<Row
+					icon={
 						<MessageCircle
 							color={C.textMuted}
 							size={16}
@@ -821,7 +948,7 @@ const styles = StyleSheet.create({
 	},
 	formatChipFirst: {},
 	formatChipLast: { borderRightWidth: 0 },
-	formatChipSelected: { backgroundColor: C.primaryMid },
+	formatChipSelected: { backgroundColor: C.primary },
 	formatChipText: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
 	formatChipTextSelected: { color: C.white },
 	formatNote: { color: C.textDim, fontSize: 12, lineHeight: 17 },
@@ -836,8 +963,8 @@ const styles = StyleSheet.create({
 		justifyContent: 'center',
 		alignItems: 'center',
 	},
-	totalRow: { backgroundColor: `${C.primaryMid}08` },
-	totalBytes: { color: C.primaryMid, fontSize: 14, fontWeight: '700' },
+	totalRow: { backgroundColor: `${C.primary}0D` },
+	totalBytes: { color: C.primary, fontSize: 14, fontWeight: '700' },
 
 	tierBadge: {
 		flexDirection: 'row',
@@ -882,5 +1009,24 @@ const styles = StyleSheet.create({
 		fontSize: 11,
 		textAlign: 'center',
 		marginTop: 8,
+	},
+
+	toggleRow: { paddingVertical: 12 },
+	toggleLabelBlock: { flex: 1 },
+	toggleSubtitle: {
+		color: C.textMuted,
+		fontSize: 12,
+		marginTop: 2,
+	},
+
+	accountBadge: {
+		color: C.primaryMid,
+		fontSize: 13,
+		fontWeight: '600',
+	},
+
+	cacheLabel: {
+		color: C.textMuted,
+		fontSize: 13,
 	},
 })

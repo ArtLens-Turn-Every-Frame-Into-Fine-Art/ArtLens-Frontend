@@ -1,12 +1,12 @@
 /**
- * ArtLens — Native Sharing Intent Receiver Route
+ * ArtLens — Native Sharing Intent Receiver Route (Light Theme Variant)
  * Extracts native shared payload binary streams using expo-sharing hooks.
  */
 
 import React, { useEffect } from 'react'
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native'
 import { router } from 'expo-router'
-import { useIncomingShare } from 'expo-sharing' // <-- Hook to extract the actual files
+import { useIncomingShare } from 'expo-sharing'
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('expo-sharing')
@@ -56,7 +56,7 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 
 	return (
 		<View style={styles.container}>
-			<ActivityIndicator color="#7C3AED" size="large" />
+			<ActivityIndicator color="#7B61FF" size="large" />
 			<Text style={styles.text}>Importing shared artwork...</Text>
 		</View>
 	)
@@ -65,13 +65,13 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 const styles = StyleSheet.create({
 	container: {
 		flex: 1,
-		backgroundColor: '#080810',
+		backgroundColor: '#F8F9FB', // Light gray background
 		justifyContent: 'center',
 		alignItems: 'center',
 		gap: 16,
 	},
 	text: {
-		color: '#F4F4FF',
+		color: '#1C1C1E', // Dark charcoal text for readability
 		fontSize: 16,
 		fontWeight: '600',
 	},
