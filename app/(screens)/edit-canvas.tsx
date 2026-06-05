@@ -64,7 +64,6 @@ import {
 import {
 	AlertCircle,
 	Battery,
-	ChevronLeft,
 	Cpu,
 	Image as ImageIcon,
 	RefreshCw,
@@ -81,6 +80,7 @@ import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import { useModelStore } from '@/shared/stores/useModelStore'
 import { StyleJobService } from '@/features/style-transfer/StyleJobService'
 import { SkiaRenderer } from '@/features/canvas/SkiaRenderer'
+import { ImageCompareSlider } from '@/shared/ui/ImageCompareSlider'
 
 // — Types ——————————————————————————————————————————————————————————————————————
 import type { StyleJob } from '@/types'
@@ -665,7 +665,6 @@ export default function EditCanvasScreen(): React.JSX.Element {
 		(s) => s.jobs.find((j) => j.id === jobId) ?? null
 	)
 	const retryJob = useStyleJobStore((s) => s.retryJob)
-	const updateJob = useStyleJobStore((s) => s.updateJob)
 	const catalog = useModelStore((s) => s.catalog)
 
 	// — Derived ———————————————————————————————————————————————————————————————
@@ -747,75 +746,26 @@ export default function EditCanvasScreen(): React.JSX.Element {
 	 * "Next" header CTA — only active when status === 'DONE'.
 	 * Delegates to the BrushCanvas snapshot handler registered via module ref.
 	 */
-	const handleNext = useCallback(async () => {
-		if (!_snapshotHandlerRef.current) {
-			tracker.warn(
-				'Header Next button clicked but snapshot handler ref is missing',
-				{
-					jobId,
-					jobStatus: job?.status,
-					hasStyleJob: !!job,
-				}
-			)
-			return
-		}
-		try {
-			await _snapshotHandlerRef.current()
-		} catch (err) {
-			// NEW GUARDRAIL CATCH BLOCK: Prevents screen action locking if child context breaks
-			tracker.error(
-				'Imperative reference execution failed on top-level header submit',
-				{
-					error: err,
-					jobId,
-					styleName,
-					isGlobalPathPopulated: !!pathRef_global.current,
-				}
-			)
+	const handleNext = useCallback(() => {
+		if (!job || !job.resultUri) return
 
-			Alert.alert(
-				'Processing Error',
-				'Could not advance to refinement workspace.'
-			)
+		setIsExporting(true)
+		try {
+			// Route directly to export using the finished AI result asset
+			router.push({
+				pathname: '/(screens)/export',
+				params: { jobId, outputUri: job.resultUri },
+			})
+		} catch (err) {
+			tracker.error('Navigation to export screen failed', {
+				error: err,
+				jobId,
+				jobStatus: job.status,
+			})
 		} finally {
 			setIsExporting(false)
 		}
-	}, [jobId, job, styleName])
-
-	/**
-	 * Called by BrushCanvas after the brush-mask composite snapshot completes.
-	 * The user has already painted which parts to stylise — this IS the refined
-	 * result. Route directly to ExportScreen so they can save/share without an
-	 * extra step. The compositeUri becomes outputUri in ExportScreen.
-	 * If they want intensity control they can use the Refine button first
-	 * before tapping Next/painting.
-	 */
-	const handleCompositeReady = useCallback(
-		(compositeUri: string) => {
-			router.push({
-				pathname: '/(screens)/export',
-				params: { jobId, outputUri: compositeUri },
-			})
-		},
-		[jobId]
-	)
-
-	/**
-	 * Called by BrushCanvas on snapshot error.
-	 * Sets job to ERROR so GalleryScreen shows the error state.
-	 */
-	const handleCanvasError = useCallback(
-		(message: string) => {
-			if (!jobId) return
-			updateJob(jobId, {
-				status: 'ERROR',
-				errorMessage: message,
-				retryable: true,
-			})
-			Alert.alert('Export Failed', message, [{ text: 'OK' }])
-		},
-		[jobId, updateJob]
-	)
+	}, [job, jobId])
 
 	// — Missing job guard —————————————————————————————————————————————————————
 	if (!jobId) {
@@ -858,19 +808,13 @@ export default function EditCanvasScreen(): React.JSX.Element {
 		>
 			{/* ── Header ────────────────────────────────────────────────────── */}
 			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
-				<Pressable
-					onPress={() => router.back()}
-					style={styles.headerBtn}
-					accessibilityRole="button"
-					accessibilityLabel="Go back"
-					hitSlop={12}
+				{/* Absolutely Centered Title Container */}
+				<View
+					style={styles.headerAbsoluteTitleContainer}
+					pointerEvents="none"
 				>
-					<ChevronLeft color={C.text} size={26} strokeWidth={1.8} />
-				</Pressable>
-
-				<View style={styles.headerCenter}>
 					<Text style={styles.headerTitle} numberOfLines={1}>
-						{styleName}
+						Anime
 					</Text>
 					{job && (
 						<Text style={styles.headerSub}>
@@ -886,6 +830,9 @@ export default function EditCanvasScreen(): React.JSX.Element {
 						</Text>
 					)}
 				</View>
+
+				{/* Invisible spacer to maintain button alignments */}
+				<View style={styles.headerBtn} />
 
 				{/* "Next" CTA — only active when done, shows spinner while exporting */}
 				{isDone ? (
@@ -921,15 +868,15 @@ export default function EditCanvasScreen(): React.JSX.Element {
 			{/* ── Canvas area ───────────────────────────────────────────────── */}
 			<View style={styles.canvas}>
 				{isDone && job.sourceUri && job.resultUri ? (
-					// DONE → interactive brush canvas
-					<BrushCanvas
-						sourceUri={job.sourceUri}
-						resultUri={job.resultUri}
-						onNext={handleCompositeReady}
-						onError={handleCanvasError}
+					// DONE → Render your interactive side-by-side comparison slider
+					<ImageCompareSlider
+						beforeUri={job.sourceUri}
+						afterUri={job.resultUri}
+						width={SCREEN_W}
+						height={CANVAS_H}
 					/>
 				) : displayUri ? (
-					// QUEUED / PROCESSING / BATTERY_PAUSED / ERROR → static image
+					// QUEUED / PROCESSING / BATTERY_PAUSED / ERROR → Keep static image
 					<Image
 						source={{ uri: displayUri }}
 						style={styles.mainImage}
@@ -948,7 +895,7 @@ export default function EditCanvasScreen(): React.JSX.Element {
 					</View>
 				)}
 
-				{/* Status overlays — hidden when DONE (BrushCanvas owns that state) */}
+				{/* Keep your status overlays for background state visibility */}
 				{job && !isDone && (
 					<StatusOverlay
 						job={job}
@@ -1089,10 +1036,22 @@ const styles = StyleSheet.create({
 	header: {
 		flexDirection: 'row',
 		alignItems: 'center',
+		justifyContent: 'space-between',
 		paddingHorizontal: 12,
 		paddingBottom: 10,
 		borderBottomWidth: StyleSheet.hairlineWidth,
 		borderBottomColor: C.border,
+		position: 'relative',
+	},
+	headerAbsoluteTitleContainer: {
+		position: 'absolute',
+		top: 33,
+		left: 0,
+		right: 0,
+		bottom: 10,
+		justifyContent: 'center',
+		alignItems: 'center',
+		zIndex: 0,
 	},
 	headerBtn: {
 		width: 40,
@@ -1100,21 +1059,20 @@ const styles = StyleSheet.create({
 		borderRadius: 20,
 		justifyContent: 'center',
 		alignItems: 'center',
-	},
-	headerCenter: {
-		flex: 1,
-		alignItems: 'center',
+		zIndex: 1,
 	},
 	headerTitle: {
 		color: C.text,
 		fontSize: 17,
 		fontWeight: '700',
 		letterSpacing: -0.2,
+		textAlign: 'center',
 	},
 	headerSub: {
 		color: C.textMuted,
 		fontSize: 12,
 		marginTop: 2,
+		textAlign: 'center',
 	},
 	nextBtn: {
 		minWidth: 70,

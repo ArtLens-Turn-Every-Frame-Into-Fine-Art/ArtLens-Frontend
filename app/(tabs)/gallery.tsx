@@ -944,7 +944,7 @@ export default function GalleryScreen(): React.JSX.Element {
 					paddingTop: systemBatteryPaused
 						? insets.top + 52
 						: insets.top + 16,
-					paddingBottom: insets.bottom + 100,
+					paddingBottom: 25,
 				}}
 				getItemLayout={(_, index) => {
 					const rowIndex = Math.floor(index / COLUMNS)

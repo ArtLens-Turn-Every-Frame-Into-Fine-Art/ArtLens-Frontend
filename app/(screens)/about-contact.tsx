@@ -279,7 +279,7 @@ export default function AboutContactScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 32 },
+					{ paddingBottom: 24 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>

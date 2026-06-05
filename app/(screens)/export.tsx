@@ -373,7 +373,6 @@ export default function ExportScreen(): React.JSX.Element {
 		[styleName, exportFormat]
 	)
 
-	const [quality, setQuality] = useState<Quality>('high')
 	const [isSaving, setIsSaving] = useState(false)
 	const [isSaved, setIsSaved] = useState(false)
 	const [isSharing, setIsSharing] = useState(false)
@@ -543,7 +542,6 @@ export default function ExportScreen(): React.JSX.Element {
 				jobId,
 				styleName,
 				exportFormat,
-				quality,
 				filename,
 				outputUri,
 				error:
@@ -570,7 +568,6 @@ export default function ExportScreen(): React.JSX.Element {
 		job,
 		jobId,
 		outputUri,
-		quality,
 		styleName,
 		updateJob,
 	])
@@ -705,7 +702,7 @@ export default function ExportScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 32 },
+					{ paddingBottom: 27 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>

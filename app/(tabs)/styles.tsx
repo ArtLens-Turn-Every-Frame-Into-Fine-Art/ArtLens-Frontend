@@ -618,7 +618,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 100 },
+					{ paddingBottom: 10 },
 				]}
 				refreshControl={
 					<RefreshControl
@@ -643,7 +643,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					/>
 					<InfoItem
 						icon={<Eye size={16} color={COLORS.primary} />}
-						label="Live Preview"
+						label="Preview Before Download"
 					/>
 					<InfoItem
 						icon={<Download size={16} color={COLORS.primary} />}
@@ -737,7 +737,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 				<View
 					style={[
 						styles.actionBar,
-						{ paddingBottom: Math.max(insets.bottom, 16) + 8 },
+						{ paddingBottom: Math.max(insets.bottom, 16) },
 					]}
 				>
 					<View style={styles.actionBarDetails}>

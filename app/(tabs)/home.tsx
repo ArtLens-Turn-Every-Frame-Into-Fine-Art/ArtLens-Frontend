@@ -509,7 +509,7 @@ export default function HomeScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 20 },
+					{ paddingBottom: 33 },
 				]}
 			>
 				{/* Error banner */}
@@ -521,7 +521,7 @@ export default function HomeScreen(): React.JSX.Element {
 				<View style={styles.heroContainer}>
 					<ImageBackground
 						source={{
-							uri: 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?q=80&w=1000',
+							uri: 'https://i.ibb.co/HfGQMXsV/Girl-with-a-Pearl-Earring.jpg',
 						}}
 						style={styles.heroImage}
 						imageStyle={{ borderRadius: 24 }}

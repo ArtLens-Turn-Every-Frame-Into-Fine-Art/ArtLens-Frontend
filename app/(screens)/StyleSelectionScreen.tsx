@@ -544,7 +544,7 @@ export default function StyleSelectionScreen({
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 120 },
+					{ paddingBottom: insets.bottom + 40 },
 				]}
 			>
 				{/* Page intro */}

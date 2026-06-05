@@ -657,7 +657,7 @@ export default function SettingsScreen(): React.JSX.Element {
 	const combinedScrollStyle = useMemo(
 		() => [
 			styles.scrollContent,
-			{ paddingTop: insets.top + 16, paddingBottom: insets.bottom + 96 },
+			{ paddingTop: insets.top + 16, paddingBottom: insets.bottom - 17 },
 		],
 		[insets.top, insets.bottom]
 	)
