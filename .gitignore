@@ -49,3 +49,6 @@ ios/
 
 # @end expo-cli
 expo-env.d.ts
+
+# others
+.kiro
