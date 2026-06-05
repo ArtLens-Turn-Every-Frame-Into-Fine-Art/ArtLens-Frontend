@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     outputs:
-      fingerprint_changed: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      fingerprint_changed: ${{ steps.fingerprint.outputs.fingerprint_changed }}
       fingerprint_hash: ${{ steps.fingerprint.outputs.fingerprint-hash }}
     steps:
       - uses: actions/checkout@v6
@@ -37,9 +37,19 @@ jobs:
         # This compares the current state against the last successful build fingerprint
         run: |
           npm ci
-          npx eas-cli fingerprint:compare --platform android --json > diff.json
-          echo "fingerprint-hash=$(npx eas-cli fingerprint:generate --platform android)" >> $GITHUB_OUTPUT
-          echo "fingerprint-diff=$(cat diff.json)" >> $GITHUB_OUTPUT
+
+          # 1. Append '|| true' so a fingerprint mismatch doesn't halt the runner
+          eas fingerprint:compare --platform android --json > diff.json || true
+
+          # 2. Check if diff.json is empty or contains an empty JSON array '[]'
+          if [ ! -s diff.json ] || [ "$(cat diff.json)" = "[]" ]; then
+            echo "fingerprint_changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "fingerprint_changed=true" >> $GITHUB_OUTPUT
+          fi
+
+          # 3. Generate and export the hash
+          echo "fingerprint-hash=$(eas fingerprint:generate --platform android)" >> $GITHUB_OUTPUT
 
   production-ship:
     needs: check_fingerprint
@@ -68,7 +78,9 @@ jobs:
 
       # 1. SHIP OTA UPDATE (Instant update for existing users)
       - name: ☁️ Publish OTA Update
-        run: eas update --branch production --message "${{ github.event.head_commit.message }}"
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: eas update --branch production --message "$COMMIT_MSG"
 
       # 2. CREATE THE RELEASE CONTAINER (Draft mode)
       - name: 📝 Create Release Container
