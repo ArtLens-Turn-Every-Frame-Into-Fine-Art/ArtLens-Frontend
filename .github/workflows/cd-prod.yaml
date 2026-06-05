@@ -14,7 +14,7 @@ jobs:
     environment: production
     outputs:
       fingerprint_changed: ${{ steps.fingerprint.outputs.fingerprint_changed }}
-      fingerprint_hash: ${{ steps.fingerprint.outputs.fingerprint-hash }}
+      fingerprint_hash: ${{ steps.fingerprint.outputs.fingerprint_hash }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -24,7 +24,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: 'npm'
+          cache: "npm"
 
       - name: 🚀 Setup Expo & EAS
         uses: expo/expo-github-action@v8
@@ -38,18 +38,30 @@ jobs:
         run: |
           npm ci
 
-          # 1. Append '|| true' so a fingerprint mismatch doesn't halt the runner
-          eas fingerprint:compare --platform android --json > diff.json || true
+          # 1. Generate fingerprint for the CURRENT commit
+          eas fingerprint:generate --platform android --json > current-fingerprint.json
 
-          # 2. Check if diff.json is empty or contains an empty JSON array '[]'
-          if [ ! -s diff.json ] || [ "$(cat diff.json)" = "[]" ]; then
+          # 2. Temporarily switch to the PREVIOUS commit to grab its blueprint
+          git checkout HEAD~1
+          npm ci --legacy-peer-deps || npm ci
+          eas fingerprint:generate --platform android --json > previous-fingerprint.json
+
+          # 3. Return to the original commit
+          git checkout -
+
+          # 4. Safely compare the two JSON structural files
+          eas fingerprint:compare --fingerprint1 previous-fingerprint.json --fingerprint2 current-fingerprint.json --json > diff.json || echo "[]" > diff.json
+
+          # 5. Use jq to parse the array size (much safer than grep)
+          if [ "$(jq '. | length' diff.json)" -eq 0 ]; then
             echo "fingerprint_changed=false" >> $GITHUB_OUTPUT
           else
             echo "fingerprint_changed=true" >> $GITHUB_OUTPUT
           fi
 
-          # 3. Generate and export the hash
-          echo "fingerprint-hash=$(eas fingerprint:generate --platform android)" >> $GITHUB_OUTPUT
+          # 6. Extract only the clean single-line hash string to avoid multi-line output breaks
+          HASH=$(jq -r '.hash' current-fingerprint.json)
+          echo "fingerprint_hash=$HASH" >> $GITHUB_OUTPUT
 
   production-ship:
     needs: check_fingerprint
@@ -76,7 +88,7 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
-      # 1. SHIP OTA UPDATE (Instant update for existing users)
+      # 1. SHIP OTA UPDATE (Instant runtime update for matching engines)
       - name: ☁️ Publish OTA Update
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -94,7 +106,7 @@ jobs:
             ## Recent Changes
             ${{ github.event.head_commit.message }}
 
-            **Fingerprint:** ${{ needs.check_fingerprint.outputs.fingerprint_hash }}
+            **Fingerprint:** `${{ needs.check_fingerprint.outputs.fingerprint_hash }}`
           draft: true # Keep as draft until builds are attached
           generate_release_notes: true
         env:
