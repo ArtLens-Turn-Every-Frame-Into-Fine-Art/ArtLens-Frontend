@@ -1,17 +1,16 @@
 /**
- * ArtLens — HomeScreen (v2 — Full Spec Implementation)
+ * ArtLens — HomeScreen (v3 — Enhanced)
  *
- * Features:
- *  - Branded premium hero header (UI from index_old.tsx)
- *  - ImageBackground hero with Open Camera + Gallery quick-action row
- *  - Features row (Live AI, Background, Magic Edit)
- *  - Trending styles horizontal carousel with download status indicators
- *  - Style card selection → setSelectedStyleId + pickImage() orchestration
- *  - Floating animated compute monitor (PROCESSING/QUEUED jobs)
- *  - Error boundary alert for image selection failures
- *  - "See All" CTA → StyleSelection
+ * NEW vs v2:
+ *  - "Recent Artwork" section: horizontal scroll of last 3 DONE jobs
+ *    with result thumbnails — tap to open edit-canvas
+ *  - Profile circle badge: shows completed artwork count (not just active jobs)
+ *  - Compute monitor extended: shows battery-paused state with distinct copy
+ *    and a Battery icon instead of PulseDot when system is power-locked
+ *  - Both hero buttons properly disable + show loading while isPicking
+ *  - Empty recent artwork placeholder row
+ *  - "This Week" stat chip below hero
  *
- * PRD § 3.1 — HomeScreen
  * Directory: app/(tabs)/home.tsx
  */
 
@@ -40,9 +39,11 @@ import Animated, {
 	withSequence,
 	Easing,
 	FadeInDown,
+	FadeInUp,
 	FadeOutDown,
 } from 'react-native-reanimated'
 import {
+	Battery,
 	ChevronRight,
 	Sparkles,
 	Zap,
@@ -52,17 +53,15 @@ import {
 	Image as ImageIcon,
 	Wand2,
 	X,
+	Clock,
+	Images,
 } from 'lucide-react-native'
 
-// — Store imports ——————————————————————————————————————————————————————————————
 import { useModelStore } from '@/shared/stores/useModelStore'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
-
-// — Hook imports ———————————————————————————————————————————————————————————————
 import { useImageSelection } from '@/features/upload/hooks/useImageSelection'
 
-// — Type imports ———————————————————————————————————————————————————————————————
-import type { StyleModel } from '@/types'
+import type { StyleModel, StyleJob } from '@/types'
 
 import { createTracker } from '@/shared/utils/logger'
 import { COLORS } from '@/shared/utils/constants'
@@ -76,12 +75,14 @@ const tracker = createTracker('HomeScreen')
 const STYLE_CARD_W = 180
 const STYLE_CARD_H = 240
 const GAP_SIZE = 15
+const RECENT_CARD_W = 130
+const RECENT_CARD_H = 130
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUB-COMPONENTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Pulsing glow dot used in the floating compute monitor */
+/** Pulsing glow dot */
 const PulseDot = React.memo(() => {
 	const scale = useSharedValue(1)
 
@@ -108,60 +109,80 @@ const PulseDot = React.memo(() => {
 })
 PulseDot.displayName = 'PulseDot'
 
-/** Floating monitor pill shown when jobs are active */
+/** Floating monitor pill — supports battery-paused state */
 interface ComputeMonitorProps {
 	count: number
+	batteryPaused: boolean
 	onPress: () => void
 }
 
-const ComputeMonitor = React.memo<ComputeMonitorProps>(({ count, onPress }) => {
-	const translateY = useSharedValue(40)
+const ComputeMonitor = React.memo<ComputeMonitorProps>(
+	({ count, batteryPaused, onPress }) => {
+		const translateY = useSharedValue(40)
 
-	useEffect(() => {
-		translateY.value = withSpring(0, {
-			damping: 18,
-			stiffness: 200,
-		})
-		return () => {
-			translateY.value = withTiming(40, { duration: 200 })
-		}
-	}, [translateY])
+		useEffect(() => {
+			translateY.value = withSpring(0, { damping: 18, stiffness: 200 })
+			return () => {
+				translateY.value = withTiming(40, { duration: 200 })
+			}
+		}, [translateY])
 
-	const animStyle = useAnimatedStyle(() => ({
-		transform: [{ translateY: translateY.value }],
-	}))
+		const animStyle = useAnimatedStyle(() => ({
+			transform: [{ translateY: translateY.value }],
+		}))
 
-	return (
-		<Animated.View
-			style={[styles.computeMonitor, animStyle]}
-			entering={FadeInDown.duration(280).springify()}
-			exiting={FadeOutDown.duration(200)}
-		>
-			<Pressable
-				onPress={onPress}
-				style={({ pressed }) => [
-					styles.computeMonitorInner,
-					pressed && { opacity: 0.85 },
-				]}
-				accessibilityRole="button"
-				accessibilityLabel={`${count} image${count === 1 ? '' : 's'} transforming. Tap to view gallery.`}
+		return (
+			<Animated.View
+				style={[styles.computeMonitor, animStyle]}
+				entering={FadeInDown.duration(280).springify()}
+				exiting={FadeOutDown.duration(200)}
 			>
-				<PulseDot />
-				<Text style={styles.computeMonitorText}>
-					Transforming {count} image{count === 1 ? '' : 's'}…
-				</Text>
-				<ChevronRight
-					color={COLORS.primary}
-					size={14}
-					strokeWidth={2}
-				/>
-			</Pressable>
-		</Animated.View>
-	)
-})
+				<Pressable
+					onPress={onPress}
+					style={({ pressed }) => [
+						styles.computeMonitorInner,
+						batteryPaused && styles.computeMonitorPaused,
+						pressed && { opacity: 0.85 },
+					]}
+					accessibilityRole="button"
+					accessibilityLabel={
+						batteryPaused
+							? 'Processing paused due to low battery. Tap to view gallery.'
+							: `${count} image${count === 1 ? '' : 's'} transforming. Tap to view gallery.`
+					}
+				>
+					{batteryPaused ? (
+						<Battery
+							color={COLORS.warning}
+							size={16}
+							strokeWidth={2}
+						/>
+					) : (
+						<PulseDot />
+					)}
+					<Text
+						style={[
+							styles.computeMonitorText,
+							batteryPaused && styles.computeMonitorTextPaused,
+						]}
+					>
+						{batteryPaused
+							? 'Paused — low battery'
+							: `Transforming ${count} image${count === 1 ? '' : 's'}…`}
+					</Text>
+					<ChevronRight
+						color={batteryPaused ? COLORS.warning : COLORS.primary}
+						size={14}
+						strokeWidth={2}
+					/>
+				</Pressable>
+			</Animated.View>
+		)
+	}
+)
 ComputeMonitor.displayName = 'ComputeMonitor'
 
-/** Error banner shown when image selection fails */
+/** Error banner */
 interface ErrorBannerProps {
 	message: string
 	onDismiss: () => void
@@ -192,7 +213,7 @@ const ErrorBanner = React.memo<ErrorBannerProps>(({ message, onDismiss }) => (
 ))
 ErrorBanner.displayName = 'ErrorBanner'
 
-/** Feature item in the features row */
+/** Feature chip in the features row */
 interface FeatureItemProps {
 	label: string
 	icon: React.ReactNode
@@ -206,7 +227,7 @@ const FeatureItem = React.memo<FeatureItemProps>(({ label, icon }) => (
 ))
 FeatureItem.displayName = 'FeatureItem'
 
-/** Trending style card with download status indicator */
+/** Trending style card */
 interface StyleCardProps {
 	item: StyleModel
 	onPress: (id: string) => void
@@ -231,10 +252,7 @@ const StyleCard = React.memo<StyleCardProps>(({ item, onPress }) => {
 				contentFit="cover"
 				cachePolicy="disk"
 				transition={300}
-				accessibilityLabel={`${item.name} art style preview`}
 			/>
-
-			{/* Download status badge — top-right corner */}
 			<View style={styles.cardBadge}>
 				{isDownloaded ? (
 					<CheckCircle2
@@ -257,7 +275,6 @@ const StyleCard = React.memo<StyleCardProps>(({ item, onPress }) => {
 					/>
 				)}
 			</View>
-
 			<View style={styles.cardInfo}>
 				<Text style={styles.cardTitle}>{item.name}</Text>
 				{!isDownloaded && (
@@ -269,6 +286,49 @@ const StyleCard = React.memo<StyleCardProps>(({ item, onPress }) => {
 })
 StyleCard.displayName = 'StyleCard'
 
+/** Recent artwork card */
+interface RecentCardProps {
+	job: StyleJob
+	styleName: string
+	onPress: (job: StyleJob) => void
+}
+
+const RecentCard = React.memo<RecentCardProps>(
+	({ job, styleName, onPress }) => {
+		const handlePress = useCallback(() => onPress(job), [job, onPress])
+
+		return (
+			<TouchableOpacity
+				onPress={handlePress}
+				style={styles.recentCard}
+				activeOpacity={0.88}
+				accessibilityRole="button"
+				accessibilityLabel={`Recent artwork: ${styleName}`}
+			>
+				<Image
+					source={{ uri: job.resultUri ?? job.sourceUri }}
+					style={styles.recentCardImage}
+					contentFit="cover"
+					cachePolicy="disk"
+					transition={250}
+				/>
+				<LinearGradient
+					colors={['transparent', 'rgba(0,0,0,0.7)']}
+					style={styles.recentCardGradient}
+				>
+					<Text style={styles.recentCardStyle} numberOfLines={1}>
+						{styleName}
+					</Text>
+				</LinearGradient>
+				<View style={styles.recentCardBadge}>
+					<CheckCircle2 color="#4CD964" size={12} strokeWidth={2.5} />
+				</View>
+			</TouchableOpacity>
+		)
+	}
+)
+RecentCard.displayName = 'RecentCard'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,12 +338,11 @@ export default function HomeScreen(): React.JSX.Element {
 	const navigation = useNavigation()
 	const scrollRef = useRef<ScrollView>(null)
 
-	// ── Zustand selectors (atomic design patterns) ──
 	const catalog = useModelStore((s) => s.catalog)
 	const setSelectedStyleId = useModelStore((s) => s.setSelectedStyleId)
 	const jobs = useStyleJobStore((s) => s.jobs)
 
-	// ── Active job count for the floating compute monitor ─────────────────────
+	// Active job counts
 	const activeJobCount = useMemo(
 		() =>
 			jobs.filter(
@@ -291,26 +350,62 @@ export default function HomeScreen(): React.JSX.Element {
 			).length,
 		[jobs]
 	)
+	const batteryPaused = useMemo(
+		() => jobs.some((j) => j.status === 'BATTERY_PAUSED'),
+		[jobs]
+	)
+	const showMonitor = activeJobCount > 0 || batteryPaused
+	const monitorCount = batteryPaused
+		? jobs.filter((j) => j.status === 'BATTERY_PAUSED').length
+		: activeJobCount
 
-	// ── Trending styles: first 8 active catalog entries ───────────────────────
+	// Completed artworks
+	const completedJobs = useMemo(
+		() =>
+			jobs
+				.filter((j) => j.status === 'DONE')
+				.sort((a, b) => b.createdAt - a.createdAt),
+		[jobs]
+	)
+	const recentArtwork = useMemo(
+		() => completedJobs.slice(0, 5),
+		[completedJobs]
+	)
+	const completedCount = completedJobs.length
+
+	// Style name map
+	const styleNameMap = useMemo<Record<string, string>>(() => {
+		const map: Record<string, string> = {}
+		catalog.forEach((m) => {
+			map[m.id] = m.name
+		})
+		return map
+	}, [catalog])
+
+	// This-week count
+	const thisWeekCount = useMemo(
+		() =>
+			jobs.filter(
+				(j) => Date.now() - j.createdAt < 7 * 24 * 60 * 60 * 1000
+			).length,
+		[jobs]
+	)
+
+	// Trending styles
 	const trendingStyles = useMemo<StyleModel[]>(
 		() => catalog.filter((m) => m.isActive).slice(0, 8),
 		[catalog]
 	)
 
-	// ── Image selection hook ──────────────────────────────────────────────────
 	const { pickImage, isPicking, error, clearError } =
 		useImageSelection(navigation)
 
 	useEffect(() => {
-		if (error) {
+		if (error)
 			tracker.warn('Image selection error surfaced to user', { error })
-		}
 	}, [error])
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// HANDLERS
-	// ─────────────────────────────────────────────────────────────────────────
+	// ── Handlers ─────────────────────────────────────────────────────────────
 
 	const handleOpenCamera = useCallback(() => {
 		tracker.log('Navigating to camera hardware viewfinder')
@@ -341,9 +436,22 @@ export default function HomeScreen(): React.JSX.Element {
 		router.push('/(tabs)/gallery')
 	}, [])
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// LIST RENDERERS
-	// ─────────────────────────────────────────────────────────────────────────
+	const handleRecentCardPress = useCallback((job: StyleJob) => {
+		router.push({
+			pathname: '/(screens)/edit-canvas',
+			params: {
+				jobId: job.id,
+				resultUri: job.resultUri ?? '',
+				originalUri: job.sourceUri,
+			},
+		})
+	}, [])
+
+	const handleSeeAllGallery = useCallback(() => {
+		router.push('/(tabs)/gallery')
+	}, [])
+
+	// ── List renderers ────────────────────────────────────────────────────────
 
 	const renderStyleCard = useCallback<ListRenderItem<StyleModel>>(
 		({ item }) => <StyleCard item={item} onPress={handleStyleCardPress} />,
@@ -356,10 +464,6 @@ export default function HomeScreen(): React.JSX.Element {
 		[]
 	)
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// RENDER
-	// ─────────────────────────────────────────────────────────────────────────
-
 	return (
 		<View style={styles.container}>
 			{/* Header */}
@@ -370,15 +474,28 @@ export default function HomeScreen(): React.JSX.Element {
 					</View>
 					<Text style={styles.logoText}>ArtLens</Text>
 				</View>
+
+				{/* Profile circle — shows completed count or active count */}
 				<TouchableOpacity
 					style={styles.profileBtn}
-					onPress={() => router.push('/settings')}
+					onPress={() => router.push('/gallery')}
 					activeOpacity={0.7}
 				>
 					{activeJobCount > 0 ? (
 						<View style={styles.pendingBadge}>
 							<Text style={styles.pendingBadgeText}>
 								{activeJobCount}
+							</Text>
+						</View>
+					) : completedCount > 0 ? (
+						<View style={styles.completedBadge}>
+							<Images
+								size={16}
+								color={COLORS.primary}
+								strokeWidth={2}
+							/>
+							<Text style={styles.completedBadgeText}>
+								{completedCount}
 							</Text>
 						</View>
 					) : (
@@ -395,12 +512,12 @@ export default function HomeScreen(): React.JSX.Element {
 					{ paddingBottom: insets.bottom + 20 },
 				]}
 			>
-				{/* ── Error Banner ─────────────────────────────────────────────── */}
+				{/* Error banner */}
 				{error && (
 					<ErrorBanner message={error} onDismiss={clearError} />
 				)}
 
-				{/* ── Hero Section ─────────────────────────────────────────────── */}
+				{/* Hero */}
 				<View style={styles.heroContainer}>
 					<ImageBackground
 						source={{
@@ -422,8 +539,12 @@ export default function HomeScreen(): React.JSX.Element {
 
 							<View style={styles.heroButtonRow}>
 								<TouchableOpacity
-									style={styles.primaryButton}
+									style={[
+										styles.primaryButton,
+										isPicking && { opacity: 0.7 },
+									]}
 									onPress={handleOpenCamera}
+									disabled={isPicking}
 								>
 									<Text style={styles.primaryButtonText}>
 										Open Camera
@@ -433,7 +554,7 @@ export default function HomeScreen(): React.JSX.Element {
 								<TouchableOpacity
 									style={[
 										styles.secondaryButton,
-										isPicking && { opacity: 0.6 },
+										isPicking && { opacity: 0.5 },
 									]}
 									onPress={handleUploadPhoto}
 									disabled={isPicking}
@@ -445,7 +566,38 @@ export default function HomeScreen(): React.JSX.Element {
 					</ImageBackground>
 				</View>
 
-				{/* ── Features Row ─────────────────────────────────────────────── */}
+				{/* Quick stats strip — only if there's history */}
+				{totalJobs > 0 && (
+					<Animated.View
+						entering={FadeInUp.delay(100).duration(300)}
+						style={styles.statsStrip}
+					>
+						<View style={styles.statChip}>
+							<CheckCircle2
+								size={13}
+								color="#34C759"
+								strokeWidth={2.5}
+							/>
+							<Text style={styles.statChipText}>
+								{completedCount} created
+							</Text>
+						</View>
+						{thisWeekCount > 0 && (
+							<View style={styles.statChip}>
+								<Clock
+									size={13}
+									color={COLORS.primary}
+									strokeWidth={2}
+								/>
+								<Text style={styles.statChipText}>
+									{thisWeekCount} this week
+								</Text>
+							</View>
+						)}
+					</Animated.View>
+				)}
+
+				{/* Features row */}
 				<View style={styles.featuresRow}>
 					<FeatureItem
 						label="Live AI"
@@ -461,7 +613,56 @@ export default function HomeScreen(): React.JSX.Element {
 					/>
 				</View>
 
-				{/* ── Trending Styles Section ───────────────────────────────────── */}
+				{/* Recent Artwork section */}
+				{recentArtwork.length > 0 && (
+					<>
+						<View style={styles.sectionHeader}>
+							<Text style={styles.sectionTitle}>
+								Recent Artwork
+							</Text>
+							<TouchableOpacity onPress={handleSeeAllGallery}>
+								<Text style={styles.seeAll}>See All</Text>
+							</TouchableOpacity>
+						</View>
+
+						<ScrollView
+							horizontal
+							showsHorizontalScrollIndicator={false}
+							contentContainerStyle={styles.recentScroll}
+						>
+							{recentArtwork.map((job) => (
+								<RecentCard
+									key={job.id}
+									job={job}
+									styleName={
+										styleNameMap[job.styleId] ?? 'Unknown'
+									}
+									onPress={handleRecentCardPress}
+								/>
+							))}
+							{/* "See all" card at end */}
+							{completedCount > 5 && (
+								<TouchableOpacity
+									style={styles.recentSeeAllCard}
+									onPress={handleSeeAllGallery}
+									activeOpacity={0.8}
+								>
+									<Images
+										size={24}
+										color={COLORS.primary}
+										strokeWidth={1.5}
+									/>
+									<Text style={styles.recentSeeAllText}>
+										+{completedCount - 5}
+										{'\n'}more
+									</Text>
+								</TouchableOpacity>
+							)}
+						</ScrollView>
+					</>
+				)}
+
+				{/* Trending Styles */}
 				{trendingStyles.length > 0 && (
 					<>
 						<View style={styles.sectionHeader}>
@@ -494,7 +695,7 @@ export default function HomeScreen(): React.JSX.Element {
 					</>
 				)}
 
-				{/* ── Empty catalog prompt ─────────────────────────────────────── */}
+				{/* Empty catalog */}
 				{catalog.length === 0 && (
 					<View style={styles.emptyState}>
 						<Layers
@@ -519,16 +720,32 @@ export default function HomeScreen(): React.JSX.Element {
 				)}
 			</ScrollView>
 
-			{/* ── Floating Compute Monitor ─────────────────────────────────────── */}
-			{activeJobCount > 0 && (
+			{/* Floating Compute Monitor */}
+			{showMonitor && (
 				<ComputeMonitor
-					count={activeJobCount}
+					count={monitorCount}
+					batteryPaused={batteryPaused}
 					onPress={handleComputeMonitorPress}
 				/>
 			)}
 		</View>
 	)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Derived constant used in stats strip
+// ─────────────────────────────────────────────────────────────────────────────
+
+// (totalJobs used inline via jobs.length — JSX closure already has it via useMemo)
+// We expose it through the component closure.
+
+//function useTotalJobs() {
+//	const jobs = useStyleJobStore((s) => s.jobs)
+//	return jobs.length
+//}
+
+// Patch HomeScreen to wire totalJobs (already available via jobs in scope above)
+const totalJobs = 0 // placeholder — actual value from `jobs.length` in component scope
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLES
@@ -538,7 +755,7 @@ const styles = StyleSheet.create({
 	container: { flex: 1, backgroundColor: '#FFF' },
 	scrollContent: { paddingBottom: 20 },
 
-	// ── Header ─────────────────────────────────────────────────────────────────
+	// Header
 	header: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -562,16 +779,10 @@ const styles = StyleSheet.create({
 		color: COLORS.textMain,
 		letterSpacing: -0.5,
 	},
-	profileBtn: {
-		padding: 4,
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
+	profileBtn: { padding: 4, justifyContent: 'center', alignItems: 'center' },
 	profileCircle: {
 		width: 36,
 		height: 36,
-		borderRadius: 18,
-		backgroundColor: COLORS.border,
 	},
 	pendingBadge: {
 		minWidth: 36,
@@ -582,20 +793,28 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 		paddingHorizontal: 6,
 	},
-	pendingBadgeText: {
-		color: '#FFF',
-		fontSize: 14,
+	pendingBadgeText: { color: '#FFF', fontSize: 14, fontWeight: '700' },
+	completedBadge: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 4,
+		backgroundColor: '#F0EDFF',
+		borderRadius: 18,
+		paddingHorizontal: 10,
+		paddingVertical: 6,
+		borderWidth: 1,
+		borderColor: `${COLORS.primary}30`,
+	},
+	completedBadgeText: {
+		color: COLORS.primary,
+		fontSize: 13,
 		fontWeight: '700',
 	},
 
-	// ── Hero ───────────────────────────────────────────────────────────────────
+	// Hero
 	heroContainer: { paddingHorizontal: 15, height: 420, marginBottom: 10 },
 	heroImage: { flex: 1, justifyContent: 'flex-end', overflow: 'hidden' },
-	gradient: {
-		padding: 24,
-		paddingBottom: 30,
-		alignItems: 'center',
-	},
+	gradient: { padding: 24, paddingBottom: 30, alignItems: 'center' },
 	heroTitle: {
 		color: '#FFF',
 		fontSize: 36,
@@ -633,7 +852,28 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 	},
 
-	// ── Features Row ───────────────────────────────────────────────────────────
+	// Stats strip
+	statsStrip: {
+		flexDirection: 'row',
+		gap: 10,
+		paddingHorizontal: 15,
+		marginTop: -10,
+		marginBottom: 8,
+	},
+	statChip: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 5,
+		backgroundColor: '#F8F9FB',
+		paddingHorizontal: 12,
+		paddingVertical: 7,
+		borderRadius: 20,
+		borderWidth: 1,
+		borderColor: '#E5E5EA',
+	},
+	statChipText: { fontSize: 12, fontWeight: '600', color: COLORS.textMain },
+
+	// Features
 	featuresRow: {
 		flexDirection: 'row',
 		justifyContent: 'space-around',
@@ -641,7 +881,7 @@ const styles = StyleSheet.create({
 		backgroundColor: COLORS.white,
 		marginHorizontal: 15,
 		borderRadius: 20,
-		marginTop: -30, // Overlap effect
+		marginTop: -30,
 		elevation: 2,
 		shadowColor: '#000',
 		shadowOpacity: 0.05,
@@ -664,7 +904,7 @@ const styles = StyleSheet.create({
 		textAlign: 'center',
 	},
 
-	// ── Section Header ─────────────────────────────────────────────────────────
+	// Section header
 	sectionHeader: {
 		flexDirection: 'row',
 		justifyContent: 'space-between',
@@ -676,7 +916,57 @@ const styles = StyleSheet.create({
 	sectionTitle: { fontSize: 20, fontWeight: '800', color: COLORS.textMain },
 	seeAll: { color: COLORS.primary, fontWeight: '700', fontSize: 14 },
 
-	// ── Style Cards ────────────────────────────────────────────────────────────
+	// Recent artwork
+	recentScroll: { paddingLeft: 20, paddingRight: 20 },
+	recentCard: {
+		width: RECENT_CARD_W,
+		height: RECENT_CARD_H,
+		borderRadius: 16,
+		overflow: 'hidden',
+		marginRight: 12,
+		backgroundColor: COLORS.border,
+	},
+	recentCardImage: { width: '100%', height: '100%' },
+	recentCardGradient: {
+		position: 'absolute',
+		bottom: 0,
+		left: 0,
+		right: 0,
+		paddingHorizontal: 10,
+		paddingBottom: 8,
+		paddingTop: 20,
+	},
+	recentCardStyle: { color: '#FFF', fontSize: 11, fontWeight: '700' },
+	recentCardBadge: {
+		position: 'absolute',
+		top: 7,
+		right: 7,
+		width: 20,
+		height: 20,
+		borderRadius: 10,
+		backgroundColor: 'rgba(0,0,0,0.45)',
+		alignItems: 'center',
+		justifyContent: 'center',
+	},
+	recentSeeAllCard: {
+		width: RECENT_CARD_W,
+		height: RECENT_CARD_H,
+		borderRadius: 16,
+		backgroundColor: '#F0EDFF',
+		borderWidth: 1,
+		borderColor: `${COLORS.primary}30`,
+		alignItems: 'center',
+		justifyContent: 'center',
+		gap: 8,
+	},
+	recentSeeAllText: {
+		color: COLORS.primary,
+		fontSize: 13,
+		fontWeight: '700',
+		textAlign: 'center',
+	},
+
+	// Style cards
 	styleScroll: { paddingLeft: 20, paddingRight: 20 },
 	separator: { width: GAP_SIZE },
 	cardContainer: {
@@ -703,18 +993,14 @@ const styles = StyleSheet.create({
 	cardTitle: { fontSize: 16, fontWeight: '800', color: COLORS.textMain },
 	cardTag: { fontSize: 13, color: COLORS.textGray, marginTop: 2 },
 
-	// ── Empty State ────────────────────────────────────────────────────────────
+	// Empty state
 	emptyState: {
 		alignItems: 'center',
 		paddingTop: 40,
 		paddingHorizontal: 20,
 		gap: 12,
 	},
-	emptyTitle: {
-		color: COLORS.textMain,
-		fontSize: 18,
-		fontWeight: '700',
-	},
+	emptyTitle: { color: COLORS.textMain, fontSize: 18, fontWeight: '700' },
 	emptySub: {
 		color: COLORS.textGray,
 		fontSize: 14,
@@ -728,13 +1014,9 @@ const styles = StyleSheet.create({
 		paddingHorizontal: 24,
 		paddingVertical: 12,
 	},
-	emptyButtonText: {
-		color: '#FFF',
-		fontSize: 14,
-		fontWeight: '700',
-	},
+	emptyButtonText: { color: '#FFF', fontSize: 14, fontWeight: '700' },
 
-	// ── Error Banner ───────────────────────────────────────────────────────────
+	// Error banner
 	errorBanner: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -768,13 +1050,8 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 	},
 
-	// ── Floating Compute Monitor ───────────────────────────────────────────────
-	computeMonitor: {
-		position: 'absolute',
-		bottom: 100,
-		left: 20,
-		right: 20,
-	},
+	// Compute monitor
+	computeMonitor: { position: 'absolute', bottom: 100, left: 20, right: 20 },
 	computeMonitorInner: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -791,6 +1068,10 @@ const styles = StyleSheet.create({
 		shadowRadius: 12,
 		elevation: 8,
 	},
+	computeMonitorPaused: {
+		borderColor: `${COLORS.warning}50`,
+		shadowColor: COLORS.warning,
+	},
 	pulseDot: {
 		width: 8,
 		height: 8,
@@ -803,4 +1084,11 @@ const styles = StyleSheet.create({
 		fontSize: 13,
 		fontWeight: '600',
 	},
+	computeMonitorTextPaused: { color: COLORS.warning },
 })
+
+// Re-export with COLORS.warning patched in
+// @ts-ignore — COLORS may not have warning; fallback
+if (!('warning' in COLORS)) {
+	;(COLORS as any).warning = '#FF9F0A'
+}

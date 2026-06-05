@@ -41,8 +41,8 @@ import type {
 import { Platform } from 'react-native'
 import * as Battery from 'expo-battery'
 
-import type { ModelSlot } from '@/types'
-import { BATTERY_LIMITS } from '@/shared/utils/constants'
+import type { ModelSlot, ModelConfig } from '@/types'
+import { BATTERY_LIMITS, INFERENCE_DELEGATES } from '@/shared/utils/constants'
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('InferenceEngine')
@@ -50,6 +50,24 @@ const tracker = createTracker('InferenceEngine')
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1 — MODULE-LEVEL STATE
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-slot ModelConfig snapshot captured at load time.
+ *
+ * Populated by loadMainModel / loadPreviewModel when a config is supplied by
+ * the caller. Cleared synchronously by unloadModel. Allows downstream
+ * consumers — TiledInferenceRunner, validateInputBuffer, etc. — to query the
+ * live runtime resolution for a mounted model without reaching back to the
+ * manifest store.
+ *
+ * Null when no model is loaded OR when the caller did not supply a config.
+ * Callers should treat a null result as "resolution unknown, refetch from
+ * ModelManager if sizing is required."
+ */
+const _loadedConfigs: Record<ModelSlot, ModelConfig | null> = {
+	preview: null,
+	main: null,
+}
 
 let _previewModel: TfliteModel | null = null
 let _mainModel: TfliteModel | null = null
@@ -74,28 +92,38 @@ const _quantized: Record<ModelSlot, boolean | null> = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Returns a platform-safe, ordered delegate array for a given slot.
+ * Returns a platform-safe, ordered delegate array for the given slot.
  *
- * CRITICAL: fast-tflite validates the ENTIRE array before loading.
- * Mixing platform-specific delegates (e.g., 'core-ml' + 'android-gpu')
- * causes an immediate throw on the incompatible platform, even if other
- * delegates in the list would have worked.
+ * MANDATE 4: All delegate literals are now sourced exclusively from the
+ * canonical INFERENCE_DELEGATES map in constants.ts. The engine does not
+ * maintain its own inline delegate arrays — any future platform additions
+ * or reorderings are made once, in constants.ts, and automatically reflected
+ * here.
  *
- * Ordering rationale:
- *   - Android: 'android-gpu' (OpenCL, fastest) → 'nnapi' (vendor DSP/NPU, broad).
- *     A24 has an Exynos 1280 with Mali-G68 MP4 — GPU delegate should mount.
- *   - iOS:     'core-ml' first (ANE hardware), 'metal' as fallback.
- *   - Preview: always CPU/XNNPACK — GPU delegates add latency for the tiny
- *     student model and can cause frame drops in the live viewfinder.
+ * CRITICAL: fast-tflite validates the ENTIRE delegate array before loading.
+ * Mixed-platform arrays (e.g. 'core-ml' + 'android-gpu') throw immediately
+ * on the incompatible platform, even if individual delegates are valid.
+ * Platform.select() guarantees each platform receives only delegates that
+ * are native to that runtime.
+ *
+ * Preview is always CPU/XNNPACK (empty array): GPU delegates add scheduling
+ * latency for the small student model and cause frame drops in the live
+ * viewfinder (PRD §2.3.3).
+ *
+ * The spread copies the readonly const arrays into mutable arrays so
+ * TypeScript does not widen the inferred return type.
  */
 function _getDefaultDelegates(slot: ModelSlot): TensorflowModelDelegate[] {
-	if (slot === 'preview') return [] // CPU/XNNPACK only — PRD §2.3.3
+	if (slot === 'preview') return [...INFERENCE_DELEGATES.preview]
 
-	return Platform.select<TensorflowModelDelegate[]>({
-		android: ['android-gpu', 'nnapi'],
-		ios: ['core-ml'],
-		default: [],
-	})!
+	const platformDelegates =
+		Platform.select<readonly TensorflowModelDelegate[]>({
+			android: INFERENCE_DELEGATES.main.android,
+			ios: INFERENCE_DELEGATES.main.ios,
+			default: INFERENCE_DELEGATES.main.default,
+		}) ?? INFERENCE_DELEGATES.main.default
+
+	return [...platformDelegates]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,36 +144,107 @@ function _setModel(slot: ModelSlot, model: TfliteModel, path: string): void {
 }
 
 /**
- * Introspects a freshly-loaded TfliteModel to determine precision mode.
- * Prefers the `dataType` field; falls back to path-heuristic.
+ * Reads the quantization mode directly from the model's tensor signature.
+ *
+ * Returns true  (INT8/UINT8 quantized model),
+ *         false (FLOAT32 model), or
+ *         null  (dataType field is absent — metadata not available).
+ *
+ * Separation of concern: this is the only place that touches model.inputs.
+ * It returns null rather than a default so that _detectQuantization can
+ * make an explicit policy decision on the absent-metadata case.
  */
-function _detectQuantization(slot: ModelSlot, model: TfliteModel): boolean {
+function _readQuantizationFromTensorSignature(
+	slot: ModelSlot,
+	model: TfliteModel
+): boolean | null {
 	try {
 		const inputs = model.inputs
-		if (!inputs || inputs.length === 0) return false
+		if (!inputs || inputs.length === 0) return null
 
 		const first = inputs[0]
-		if ('dataType' in first && typeof first.dataType === 'string') {
-			const dt = (first.dataType as string).toLowerCase()
-			const isU8 = dt === 'uint8' || dt === 'int8'
-			tracker.log(
-				`[quantize-detect] slot="${slot}" dataType="${first.dataType}" → isQuantized=${isU8}`
-			)
-			return isU8
+		if (!('dataType' in first) || typeof first.dataType !== 'string') {
+			return null
 		}
 
-		const pathHint = (_activeModelPaths[slot] ?? '').toLowerCase()
-		const isU8 =
-			pathHint.includes('quant') ||
-			pathHint.includes('uint8') ||
-			pathHint.includes('u8')
+		const dt = (first.dataType as string).toLowerCase()
+		const isQuantized = dt === 'uint8' || dt === 'int8'
 		tracker.log(
-			`[quantize-detect] slot="${slot}" path-heuristic → isQuantized=${isU8}`
+			`[quantize-detect] slot="${slot}" tensor.dataType="${first.dataType}" ` +
+				`→ isQuantized=${isQuantized}`
 		)
-		return isU8
+		return isQuantized
 	} catch {
-		return false
+		return null
 	}
+}
+
+/**
+ * Resolves the quantization profile for a freshly-loaded slot.
+ *
+ * MANDATE 2 — Resolution order (no path-heuristic guesswork):
+ *
+ *  1. Config manifest hint — if the caller supplied a ModelConfig that
+ *     carries an explicit `quantized: boolean` field, that is the contract.
+ *     The tensor signature is still read and a warning is emitted on conflict
+ *     (config says quantized but tensor says float32 is a manifest error).
+ *
+ *  2. Tensor signature introspection — reading `model.inputs[0].dataType`
+ *     is the authoritative source of truth from the binary itself.
+ *
+ *  3. No fallback guesswork. If both sources are absent, the model defaults
+ *     to non-quantized (float32) and logs an explicit warning. Callers that
+ *     need guaranteed quantization status must supply a ModelConfig.
+ *
+ * @param slot   - Slot being loaded (for tracker context only)
+ * @param model  - Successfully mounted TfliteModel
+ * @param config - Optional ModelConfig supplied by the caller at load time
+ */
+function _detectQuantization(
+	slot: ModelSlot,
+	model: TfliteModel,
+	config?: ModelConfig
+): boolean {
+	// ── Branch 1: Config-manifest authoritative hint ─────────────────────────
+	//
+	// ModelConfig does not currently define a `quantized` field, but the
+	// engine is forward-compatible: if the manifest schema ever adds one,
+	// this branch activates automatically without a code change.
+	if (
+		config != null &&
+		'quantized' in config &&
+		typeof (config as Record<string, unknown>).quantized === 'boolean'
+	) {
+		const configHint = (config as Record<string, unknown>)
+			.quantized as boolean
+		const tensorResult = _readQuantizationFromTensorSignature(slot, model)
+
+		if (tensorResult !== null && tensorResult !== configHint) {
+			tracker.warn(
+				`[quantize-detect] slot="${slot}" CONFLICT: config.quantized=${configHint} ` +
+					`disagrees with tensor signature (isQuantized=${tensorResult}). ` +
+					`Trusting tensor signature — update the manifest config to resolve.`
+			)
+			return tensorResult
+		}
+
+		tracker.log(
+			`[quantize-detect] slot="${slot}" → config manifest hint: isQuantized=${configHint}`
+		)
+		return configHint
+	}
+
+	// ── Branch 2: Tensor signature introspection ─────────────────────────────
+	const tensorResult = _readQuantizationFromTensorSignature(slot, model)
+	if (tensorResult !== null) return tensorResult
+
+	// ── Branch 3: No guesswork — default float32 with explicit warning ───────
+	tracker.warn(
+		`[quantize-detect] slot="${slot}" — tensor dataType field is absent and no ` +
+			`ModelConfig hint was supplied. Defaulting to float32 (non-quantized). ` +
+			`Supply a ModelConfig with quantization metadata to suppress this warning.`
+	)
+	return false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,25 +291,58 @@ export class BatteryGuardError extends Error {
 // SECTION 5 — PUBLIC: unloadModel (SYNCHRONOUS)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Severs all references to the native TFLite model mounted in `slot` and
+ * zeroes every associated tracking index synchronously.
+ *
+ * MANDATE 3 — Synchronous reference purge:
+ *   This function is intentionally synchronous. loadMainModel and loadPreviewModel
+ *   call it as the very first operation inside their try blocks — before any await.
+ *   JS single-threaded execution guarantees the entire unload sequence completes
+ *   atomically relative to the calling task: no microtask or macrotask can observe
+ *   a partial-unload state where, e.g., _activeModelPaths is null but _mainModel
+ *   is still live.
+ *
+ * Native dispose():
+ *   Called fire-and-forget (void). The TFLite runtime may need an extra tick to
+ *   release GPU/DSP allocations, but the JS reference is severed immediately.
+ *   The try/catch ensures a faulty dispose() implementation does not abort the
+ *   cleanup sequence — reference nullification IS the primary GC signal for the
+ *   JS heap. The native side will reclaim its memory when the refcount drops.
+ *
+ * @param slot - The model slot to unload.
+ */
 export function unloadModel(slot: ModelSlot): void {
 	const model = _getModel(slot)
+
 	if (model !== null) {
 		try {
 			void (
 				model as unknown as { dispose?: () => Promise<void> | void }
 			).dispose?.()
 		} catch {
-			// Non-fatal — reference nullification is the real cleanup.
+			// Non-fatal: dispose() is best-effort. JS reference nullification
+			// below is the authoritative cleanup step.
 		}
+
+		// ── Sever native reference synchronously and unconditionally ─────────
 		if (slot === 'preview') {
 			_previewModel = null
 		} else {
 			_mainModel = null
 		}
 	}
+
+	// ── Zero all tracking indices, regardless of whether a model was mounted ─
+	// This guarantees consistency even when unloadModel is called on an already-
+	// empty slot (e.g., error-path cleanup in loadMainModel after a failed load).
 	_activeModelPaths[slot] = null
 	_quantized[slot] = null
-	tracker.log(`Slot '${slot}' unloaded — native reference released.`)
+	_loadedConfigs[slot] = null
+
+	tracker.log(
+		`unloadModel('${slot}'): native reference severed, all tracking state cleared.`
+	)
 }
 
 export function unloadAllModels(): void {
@@ -220,97 +352,116 @@ export function unloadAllModels(): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 6 — PUBLIC: loadModel
+// SECTION 6 — PUBLIC: loadMainModel
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Loads a TFLite model into the specified slot.
+ * Loads a TFLite model into the MAIN (teacher) slot.
  *
- * KEY CHANGE (FIX A): Slot isolation is now SYNCHRONOUS and happens as the
- * very first operation inside the try block — before any `await`.
+ * MANDATE 3 — Synchronous opposing-slot reclamation:
+ *   The `preview` slot is unloaded and ALL its tracking references are set to
+ *   null SYNCHRONOUSLY as the very first operation inside the try block — before
+ *   any await (battery read, filesystem/network model fetch). JS single-threaded
+ *   execution guarantees that no other microtask or macrotask can run between
+ *   `_loading['main'] = true` and the first `await`, making this phase
+ *   atomically exclusive. Both models can never coexist in memory.
  *
- * JS single-threaded execution guarantees that between `_loading[slot] = true`
- * and the first `await`, no other JS code can run, so the isolation is
- * truly atomic. Previously, isolation occurred after `_checkBatteryGuard`
- * (an async call), creating a window where `_abortCurrentJob` could be set
- * by `prioritizeJob/pauseJob`, causing immediate "ghost unload" on return.
+ * MANDATE 4 — Delegate resolution:
+ *   Delegates are sourced exclusively from INFERENCE_DELEGATES via
+ *   _getDefaultDelegates(). On primary load failure, the engine drops cleanly
+ *   to CPU-only execution and logs the failing delegate set through tracker so
+ *   the crash analytics pipeline captures the device's delegate rejection reason.
  *
- * KEY CHANGE (FIX B): Delegates are resolved via `_getDefaultDelegates()`,
- * which uses `Platform.OS` to exclude CoreML on Android and NNAPI on iOS.
+ * MANDATE 2 — Quantization:
+ *   _detectQuantization() is called with the caller-supplied config, enabling
+ *   manifest-driven quantization verification against the tensor signature.
  *
- * KEY CHANGE (FIX C): If the opposing slot is mid-load (_loading[opposing]),
- * we abort with a no-op rather than racing it.
+ * @param modelPath        - Absolute file:// URI or network URL of the .tflite binary
+ * @param config           - Optional hydrated ModelConfig for the mounted style.
+ *                           Stored on the slot and returned by getActiveModelConfig().
+ * @param delegateOverride - If provided, bypasses _getDefaultDelegates() entirely.
+ *                           Useful for hardware benchmark and delegate probe tests.
  */
-export async function loadModel(
-	slot: ModelSlot,
+export async function loadMainModel(
 	modelPath: string,
+	config?: ModelConfig,
 	delegateOverride?: TensorflowModelDelegate[]
 ): Promise<void> {
+	const slot: ModelSlot = 'main'
+	const opposing: ModelSlot = 'preview'
+
 	if (_loading[slot]) {
-		tracker.log(`loadModel('${slot}'): already in progress — skipping.`)
+		tracker.log(`loadMainModel: already in progress — skipping.`)
 		return
 	}
 
 	if (_activeModelPaths[slot] === modelPath && _getModel(slot) !== null) {
-		tracker.log(
-			`loadModel('${slot}'): '${modelPath}' already loaded — no-op.`
-		)
+		tracker.log(`loadMainModel: '${modelPath}' already loaded — no-op.`)
 		return
 	}
 
-	// Set guard synchronously — no await between here and the isolation step.
+	// ── MANDATE 3: Acquire loading guard — synchronous, no await precedes this ─
 	_loading[slot] = true
 
 	try {
-		// ── FIX A: SYNCHRONOUS isolation — before any await ───────────────────
-		// This eliminates the race window where _abortCurrentJob could be set
-		// between the battery guard resolution and the isolation call.
-		const opposing: ModelSlot = slot === 'preview' ? 'main' : 'preview'
-
-		// FIX C: Abort if opposing slot is mid-load to prevent concurrent loads.
+		// ── MANDATE 3: Opposing-slot synchronous reclamation ─────────────────────
+		//
+		// FIX C: If preview is mid-load, abort rather than race it. The opposing
+		// slot check is the very first operation — the only JS that runs between
+		// _loading[slot] = true above and this block is the const assignment.
 		if (_loading[opposing]) {
 			tracker.warn(
-				`loadModel('${slot}'): opposing slot '${opposing}' is loading — deferring to prevent concurrent allocation.`
+				`loadMainModel: opposing slot '${opposing}' is mid-load — ` +
+					`deferring to prevent concurrent native allocation.`
 			)
 			return
 		}
 
+		// Sever the preview model from native memory before any I/O begins.
+		// unloadModel is synchronous; after it returns, _previewModel === null,
+		// _activeModelPaths['preview'] === null, _quantized['preview'] === null,
+		// _loadedConfigs['preview'] === null. No async gap has opened.
 		if (
 			_getModel(opposing) !== null ||
 			_activeModelPaths[opposing] !== null
 		) {
 			tracker.log(
-				`loadModel('${slot}'): isolating — synchronously unloading '${opposing}'.`
+				`loadMainModel: synchronously releasing '${opposing}' slot ` +
+					`before any model I/O begins.`
 			)
 			unloadModel(opposing)
 		}
 
-		// ── Battery guard (only blocks 'main', await is safe here post-isolation) ─
+		// ── Battery guard (main slot only — safe to await post-isolation) ────────
 		await _checkBatteryGuard(slot)
 
-		// ── FIX B: Platform-safe delegate resolution ───────────────────────────
+		// ── MANDATE 4: Platform-safe delegate resolution via INFERENCE_DELEGATES ─
 		const delegates: TensorflowModelDelegate[] =
 			delegateOverride ?? _getDefaultDelegates(slot)
 
 		tracker.log(
-			`loadModel('${slot}'): loading '${modelPath}' delegates=[${delegates.join(', ') || 'cpu-xnnpack'}]`
+			`loadMainModel: mounting '${modelPath}' ` +
+				`delegates=[${delegates.join(', ') || 'cpu-xnnpack'}]`
 		)
 
-		// ── Primary load + CPU fallback ────────────────────────────────────────
+		// ── Primary load with explicit CPU fallback diagnostics ───────────────────
 		let model: TfliteModel
 		try {
 			model = await loadTensorflowModel({ url: modelPath }, delegates)
 		} catch (primaryErr) {
 			if (delegates.length > 0) {
-				tracker.log(
-					`loadModel('${slot}'): hardware delegate load failed — retrying CPU-only. ` +
-						`Error: ${primaryErr}`
+				// MANDATE 4: Log the exact failing delegate set so the tracker
+				// pipeline captures device-specific delegate rejection reasons.
+				tracker.warn(
+					`loadMainModel: hardware delegate boot failed ` +
+						`(delegates=[${delegates.join(', ')}]) — ` +
+						`dropping to CPU execution context. Error: ${primaryErr}`
 				)
 				try {
 					model = await loadTensorflowModel({ url: modelPath }, [])
 				} catch (cpuErr) {
 					tracker.error(
-						`loadModel('${slot}'): CPU fallback also failed. Error: ${cpuErr}`
+						`loadMainModel: CPU-only fallback also failed. Error: ${cpuErr}`
 					)
 					throw cpuErr
 				}
@@ -319,14 +470,17 @@ export async function loadModel(
 			}
 		}
 
+		// ── Commit to module state ────────────────────────────────────────────────
 		_setModel(slot, model, modelPath)
-		_quantized[slot] = _detectQuantization(slot, model)
+		_loadedConfigs[slot] = config ?? null
+		// MANDATE 2: Pass config so manifest-driven quantization can be enforced.
+		_quantized[slot] = _detectQuantization(slot, model, config)
 
 		tracker.log(
-			`loadModel('${slot}'): SUCCESS '${modelPath}' isQuantized=${_quantized[slot]}`
+			`loadMainModel: SUCCESS '${modelPath}' isQuantized=${_quantized[slot]}`
 		)
 	} catch (err) {
-		// Synchronous cleanup — no race risk since unloadModel is sync.
+		// Synchronous cleanup — unloadModel is sync, no race risk.
 		unloadModel(slot)
 		throw err
 	} finally {
@@ -335,25 +489,151 @@ export async function loadModel(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 7 — PUBLIC: CONVENIENCE ALIASES
+// SECTION 7 — PUBLIC: loadPreviewModel
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Loads a TFLite model into the PREVIEW (student) slot.
+ *
+ * MANDATE 3 — Synchronous opposing-slot reclamation:
+ *   The `main` slot is unloaded synchronously before any await, by the same
+ *   mechanism as loadMainModel. Both models can never coexist in memory.
+ *
+ * Battery guard is intentionally absent for this slot. The preview model runs
+ * CPU/XNNPACK-only (see INFERENCE_DELEGATES.preview) and its memory footprint
+ * is an order of magnitude smaller than the teacher. Blocking the live
+ * viewfinder at low battery would degrade UX without meaningful power saving.
+ *
+ * @param modelPath        - Absolute file:// URI or network URL of the .tflite binary
+ * @param config           - Optional hydrated ModelConfig for the mounted style.
+ * @param delegateOverride - If provided, bypasses _getDefaultDelegates().
+ */
 export async function loadPreviewModel(
 	modelPath: string,
+	config?: ModelConfig,
 	delegateOverride?: TensorflowModelDelegate[]
 ): Promise<void> {
-	return loadModel('preview', modelPath, delegateOverride)
-}
+	const slot: ModelSlot = 'preview'
+	const opposing: ModelSlot = 'main'
 
-export async function loadMainModel(
-	modelPath: string,
-	delegateOverride?: TensorflowModelDelegate[]
-): Promise<void> {
-	return loadModel('main', modelPath, delegateOverride)
+	if (_loading[slot]) {
+		tracker.log(`loadPreviewModel: already in progress — skipping.`)
+		return
+	}
+
+	if (_activeModelPaths[slot] === modelPath && _getModel(slot) !== null) {
+		tracker.log(`loadPreviewModel: '${modelPath}' already loaded — no-op.`)
+		return
+	}
+
+	// ── MANDATE 3: Acquire loading guard — synchronous, no await precedes this ─
+	_loading[slot] = true
+
+	try {
+		// ── MANDATE 3: Opposing-slot synchronous reclamation ─────────────────────
+		//
+		// FIX C: Opposing-slot mid-load guard.
+		if (_loading[opposing]) {
+			tracker.warn(
+				`loadPreviewModel: opposing slot '${opposing}' is mid-load — ` +
+					`deferring to prevent concurrent native allocation.`
+			)
+			return
+		}
+
+		// Release main model before any I/O begins. See loadMainModel for the
+		// detailed synchronous-atomicity rationale.
+		if (
+			_getModel(opposing) !== null ||
+			_activeModelPaths[opposing] !== null
+		) {
+			tracker.log(
+				`loadPreviewModel: synchronously releasing '${opposing}' slot ` +
+					`before any model I/O begins.`
+			)
+			unloadModel(opposing)
+		}
+
+		// ── No battery guard for preview slot — see JSDoc above ──────────────────
+
+		// ── MANDATE 4: Delegate resolution ───────────────────────────────────────
+		const delegates: TensorflowModelDelegate[] =
+			delegateOverride ?? _getDefaultDelegates(slot)
+
+		tracker.log(
+			`loadPreviewModel: mounting '${modelPath}' ` +
+				`delegates=[${delegates.join(', ') || 'cpu-xnnpack'}]`
+		)
+
+		// ── Primary load with CPU fallback ────────────────────────────────────────
+		//
+		// delegateOverride is the only realistic path for delegates.length > 0 on
+		// the preview slot (INFERENCE_DELEGATES.preview is empty). The fallback
+		// block is retained defensively for custom override scenarios.
+		let model: TfliteModel
+		try {
+			model = await loadTensorflowModel({ url: modelPath }, delegates)
+		} catch (primaryErr) {
+			if (delegates.length > 0) {
+				tracker.warn(
+					`loadPreviewModel: delegate load failed ` +
+						`(delegates=[${delegates.join(', ')}]) — ` +
+						`dropping to CPU execution context. Error: ${primaryErr}`
+				)
+				try {
+					model = await loadTensorflowModel({ url: modelPath }, [])
+				} catch (cpuErr) {
+					tracker.error(
+						`loadPreviewModel: CPU-only fallback also failed. Error: ${cpuErr}`
+					)
+					throw cpuErr
+				}
+			} else {
+				throw primaryErr
+			}
+		}
+
+		// ── Commit to module state ────────────────────────────────────────────────
+		_setModel(slot, model, modelPath)
+		_loadedConfigs[slot] = config ?? null
+		_quantized[slot] = _detectQuantization(slot, model, config)
+
+		tracker.log(
+			`loadPreviewModel: SUCCESS '${modelPath}' isQuantized=${_quantized[slot]}`
+		)
+	} catch (err) {
+		unloadModel(slot)
+		throw err
+	} finally {
+		_loading[slot] = false
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8 — PUBLIC: runInferenceSync (worklet-safe)
+// SECTION 8 — PUBLIC: loadModel (backward-compat dispatch shim)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generic slot dispatcher retained for backward compatibility.
+ *
+ * Prefer the explicit loadMainModel / loadPreviewModel call sites in all new
+ * code — they carry full JSDoc, slot-specific guard logic (battery guard,
+ * delegate rationale), and are easier to grep in the call graph.
+ *
+ * @deprecated Use loadMainModel / loadPreviewModel directly.
+ */
+export async function loadModel(
+	slot: ModelSlot,
+	modelPath: string,
+	delegateOverride?: TensorflowModelDelegate[]
+): Promise<void> {
+	return slot === 'main'
+		? loadMainModel(modelPath, undefined, delegateOverride)
+		: loadPreviewModel(modelPath, undefined, delegateOverride)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 9 — PUBLIC: runInferenceSync (worklet-safe)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function runInferenceSync(
@@ -394,19 +674,48 @@ export function runInferenceSync(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 9 — PUBLIC: STATE INSPECTION
+// SECTION 10 — PUBLIC: STATE INSPECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Returns true if a native TFLite model is currently mounted in the given slot.
+ * Thread-safe under JS's single-threaded model — no observable torn state.
+ */
 export function isModelLoaded(slot: ModelSlot): boolean {
 	return _getModel(slot) !== null
 }
 
+/**
+ * Returns true if the model currently loaded in `slot` is INT8/UINT8 quantized.
+ *
+ * MANDATE 2: This value is resolved once at load time via _detectQuantization()
+ * using either the manifest config hint or the tensor signature — never via a
+ * runtime path heuristic. Returns false if no model is mounted (null sentinel).
+ */
 export function isModelQuantized(slot: ModelSlot): boolean {
 	return _quantized[slot] === true
 }
 
+/**
+ * Returns the absolute file:// URI or network URL of the currently-mounted model
+ * for the given slot, or null if the slot is empty.
+ */
 export function getActiveModelPath(slot: ModelSlot): string | null {
 	return _activeModelPaths[slot]
+}
+
+/**
+ * Returns the ModelConfig snapshot that was supplied at load time for `slot`,
+ * or null if the slot is empty or was loaded without a config.
+ *
+ * MANDATE 1: Callers (e.g. TiledInferenceRunner) can use this to retrieve the
+ * live runtime resolution (config.mainModel / config.previewModel) for the
+ * mounted model without re-querying the manifest store, and without relying on
+ * any static size constant. A null return signals that sizing must be resolved
+ * from getModelConfig(styleId) in ModelManager.
+ */
+export function getActiveModelConfig(slot: ModelSlot): ModelConfig | null {
+	return _loadedConfigs[slot]
 }
 
 export function isModelLoading(slot: ModelSlot): boolean {

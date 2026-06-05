@@ -2,14 +2,27 @@
  * @file useModelStore.ts
  * @description Global Zustand v5 store for the ArtLens style model catalog and manifest sync state.
  *
- * REFACTOR CHANGES (v2):
- *   — updateDownloadStatus now accepts an optional `progress` float (0.0–1.0) and
- *     applies `downloadStatus` + `downloadProgress` atomically in a single set() call,
- *     preventing split-update re-render cascades during high-frequency download ticks.
- *   — applyManifestUpdate guarantees that newly inserted catalog entries are always
- *     initialized with an explicit `downloadProgress: 0` (was previously relying on
- *     a spread that could miss the field if ManifestUpdate extended the shape).
- *   — All legacy state keys and action aliases are retained for backward-compat.
+ * REFACTOR CHANGES (v3):
+ *
+ *   FIX S1 — _storageAdapter.removeItem return type annotation was `: boolean`.
+ *     The Zustand PersistStorage adapter contract requires removeItem to return
+ *     `void | Promise<void>`. The explicit wrong annotation caused a type mismatch
+ *     with createJSONStorage. Removed the annotation so TypeScript infers `void`
+ *     from _mmkv.remove(), which is the correct return type.
+ *
+ *   FIX S2 — _mapConfigToModelConfig now accepts RemoteModelConfig instead of
+ *     ManifestUpdate['config'] (which was ModelConfig — all fields required).
+ *     Since ManifestUpdate.config is now RemoteModelConfig (previewModel is
+ *     optional), the `?? DEFAULT_MODEL_CONFIG.previewModel` fallback is now
+ *     semantically correct and will actually trigger when the API omits the field.
+ *
+ *   FIX S3 — New catalog entries now go through _mapConfigToModelConfig.
+ *     Previously, applyManifestUpdate used `config: incoming.config` for brand-new
+ *     entries while version-bumped existing entries used `_mapConfigToModelConfig`.
+ *     This asymmetry meant new entries bypassed the DEFAULT_MODEL_CONFIG merge,
+ *     producing a ModelConfig where engine-only fields (tileOverlap, luminanceBlend,
+ *     colour modes) were undefined at runtime despite being typed as required numbers.
+ *     Both code paths now use _mapConfigToModelConfig for consistency.
  *
  * PRD § 2.2 / 5.2 — Directory: src/shared/stores/useModelStore.ts
  */
@@ -25,8 +38,14 @@ import type {
 	ClientHash,
 	DownloadStatus,
 	ManifestUpdate,
+	ModelConfig,
+	RemoteModelConfig,
 } from '@/types'
 import { STORAGE_INSTANCE_IDS } from '@/shared/utils/storageKeys'
+import {
+	DEFAULT_MODEL_CONFIG,
+	MIN_INFERENCE_RESOLUTION,
+} from '@/shared/utils/constants'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL PAYLOAD TYPES
@@ -85,6 +104,7 @@ interface ModelStoreActions {
 	 *   - `deleted` IDs: mark isActive=false, keep on disk.
 	 *   - `updates` with new version: reset downloadStatus to 'not_downloaded'.
 	 *   - New IDs not in the catalog: insert with downloadProgress: 0 (EXPLICIT).
+	 *   - All entries (new and version-bumped) go through _mapConfigToModelConfig.
 	 *   - Existing IDs with unchanged version: preserve downloadStatus/Progress.
 	 */
 	applyManifestUpdate: (
@@ -95,12 +115,6 @@ interface ModelStoreActions {
 	/**
 	 * Atomically updates the download lifecycle state and optional byte progress
 	 * of a single catalog entry.
-	 *
-	 * REFACTOR NOTE: The `progress` parameter was added to allow ModelManager's
-	 * concurrent download multiplexer to pipe high-frequency byte-fraction updates
-	 * into the store without requiring two separate set() calls per tick.
-	 * Both fields are applied in a single catalog map pass to prevent split-render
-	 * artifacts (e.g., status='downloading' visible briefly with stale progress=1).
 	 *
 	 * @param styleId  - Target entry identifier.
 	 * @param status   - New DownloadStatus value.
@@ -124,10 +138,60 @@ export type ModelStore = ModelStoreState & ModelStoreActions
 
 const _mmkv = createMMKV({ id: STORAGE_INSTANCE_IDS.MODELS })
 
+/**
+ * FIX S1: `removeItem` return type annotation removed.
+ * The correct return type per Zustand's PersistStorage interface is
+ * `void | Promise<void>`. The previous annotation `: boolean` was incorrect
+ * and conflicted with the interface, causing a type error at the createJSONStorage
+ * call site. TypeScript now infers `void` from _mmkv.remove(), which is correct.
+ */
 const _storageAdapter = {
 	setItem: (key: string, value: string): void => _mmkv.set(key, value),
 	getItem: (key: string): string | null => _mmkv.getString(key) ?? null,
-	removeItem: (key: string): boolean => _mmkv.remove(key),
+	removeItem: (key: string) => _mmkv.remove(key),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIG MAPPING HELPER
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Converts a RemoteModelConfig (partial API shape) into the engine-ready
+ * ModelConfig shape, backfilling all engine-only fields from DEFAULT_MODEL_CONFIG.
+ *
+ * FIX S2: Parameter type changed from `ManifestUpdate['config']` (which was
+ * `ModelConfig`, all fields required) to `RemoteModelConfig` (only mainModel
+ * required, previewModel optional). This makes the `?? DEFAULT_MODEL_CONFIG
+ * .previewModel` fallback semantically correct: it now triggers when the API
+ * genuinely omits previewModel, instead of being dead code on a non-nullable field.
+ *
+ * BUG 10 FIX: Added MIN_INFERENCE_RESOLUTION validation for mainModel and
+ * previewModel, mirroring the validation already present in
+ * ModelManager.hydrateRemoteConfig(). Previously this function copied
+ * config.mainModel verbatim — a manifest serving `mainModel: 0` or a negative
+ * value would propagate corrupted data into the Zustand catalog, where UI
+ * components and analytics would read it without any guard.
+ *
+ * This mirrors the logic in hydrateRemoteConfig() in ModelManager.ts so that
+ * applyManifestUpdate produces configs consistent with those written to the
+ * MMKV registry.
+ */
+function _mapConfigToModelConfig(config: RemoteModelConfig): ModelConfig {
+	return {
+		...DEFAULT_MODEL_CONFIG,
+		mainModel:
+			typeof config.mainModel === 'number' &&
+			config.mainModel >= MIN_INFERENCE_RESOLUTION
+				? config.mainModel
+				: DEFAULT_MODEL_CONFIG.mainModel,
+		// FIX S2 + BUG 10: validated ?? fallback — triggers both on undefined
+		// (API omits field) and on invalid values (corrupt manifest).
+		previewModel:
+			typeof config.previewModel === 'number' &&
+			config.previewModel >= MIN_INFERENCE_RESOLUTION
+				? config.previewModel
+				: DEFAULT_MODEL_CONFIG.previewModel,
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,9 +237,8 @@ export const useModelStore = create<ModelStore>()(
 			updateCatalog: (catalog) => set({ catalog }),
 
 			/**
-			 * REFACTOR: updateDownloadStatus now accepts optional `progress` and
-			 * applies both `downloadStatus` and `downloadProgress` in one atomic
-			 * map pass — no second set() call, no split-render window.
+			 * Atomically updates downloadStatus and optionally downloadProgress
+			 * in a single catalog map pass to prevent split-render artifacts.
 			 */
 			updateDownloadStatus: (
 				styleId: StyleId,
@@ -186,10 +249,6 @@ export const useModelStore = create<ModelStore>()(
 					catalog: state.catalog.map((model) => {
 						if (model.id !== styleId) return model
 
-						// Build the update object atomically.
-						// Only update downloadProgress if the caller provided a value;
-						// otherwise keep the existing progress to avoid clobbering a
-						// value set by a concurrent progress tick.
 						const progressUpdate: Pick<
 							StyleModel,
 							'downloadProgress'
@@ -207,22 +266,23 @@ export const useModelStore = create<ModelStore>()(
 				})),
 
 			/**
-			 * REFACTOR: Explicit `downloadProgress: 0` guaranteed for every new
-			 * catalog entry insertion. The old spread relied on ManifestUpdate
-			 * containing the field, which it never does (it's a server shape).
+			 * FIX S3: Both new entries and version-bumped existing entries now go
+			 * through _mapConfigToModelConfig, ensuring the catalog always contains
+			 * fully-hydrated ModelConfig objects regardless of which code path
+			 * created the entry. Previously, new entries were inserted with
+			 * `config: incoming.config` (the raw RemoteModelConfig), leaving
+			 * engine-only fields undefined despite being typed as required numbers.
 			 */
 			applyManifestUpdate: (
 				update: ManifestUpdatePayload,
 				newHash: ClientHash
 			) =>
 				set((state) => {
-					// Build a mutable working map from the current catalog.
 					const catalogMap = new Map<StyleId, StyleModel>(
 						state.catalog.map((m) => [m.id, m])
 					)
 
 					// ── Step 1: Mark server-deleted entries as inactive ────────
-					// Per PRD § 2.2: files are KEPT on disk; only isActive changes.
 					if (Array.isArray(update?.deleted)) {
 						for (const id of update.deleted) {
 							const existing = catalogMap.get(id)
@@ -241,38 +301,30 @@ export const useModelStore = create<ModelStore>()(
 							const existing = catalogMap.get(incoming.id)
 
 							if (existing) {
-								// Known entry — check version change.
 								const versionBumped =
 									existing.version !== incoming.version
 
 								catalogMap.set(incoming.id, {
-									// Retain all local tracking fields by default.
 									...existing,
-									// Apply every server-side field from the delta.
 									...incoming,
-									// Ensure config always has a string value.
-									config:
-										incoming.config ??
-										existing.config ??
-										'',
-									// Server says it is active again.
+									// FIX S3: both paths use _mapConfigToModelConfig
+									config: versionBumped
+										? _mapConfigToModelConfig(
+												incoming.config
+											)
+										: existing.config,
 									isActive: true,
-									// Version bump → force re-download.
-									// Same version → keep existing download state.
 									downloadStatus: versionBumped
 										? 'not_downloaded'
 										: existing.downloadStatus,
-									// Version bump → reset progress to 0.
-									// Same version → keep current progress.
 									downloadProgress: versionBumped
 										? 0
 										: existing.downloadProgress,
 								})
 							} else {
-								// Brand-new entry — initialize all local fields explicitly.
-								// REFACTOR: `downloadProgress: 0` is written unconditionally
-								// here; it must never be left to a spread from ManifestUpdate
-								// (which has no such field).
+								// FIX S3: new entries also use _mapConfigToModelConfig
+								// — no longer rely on `incoming.config` directly,
+								// which would silently omit engine-only ModelConfig fields.
 								const newEntry: StyleModel = {
 									id: incoming.id,
 									name: incoming.name,
@@ -283,10 +335,12 @@ export const useModelStore = create<ModelStore>()(
 									isActive: true,
 									previewModelUrl: incoming.previewModelUrl,
 									mainModelUrl: incoming.mainModelUrl,
-									config: incoming.config ?? '',
-									// ── Local tracking fields (never from server) ──
+									config: _mapConfigToModelConfig(
+										incoming.config
+									),
+									// ── Local tracking fields ──
 									downloadStatus: 'not_downloaded',
-									downloadProgress: 0, // EXPLICIT — guaranteed initialization
+									downloadProgress: 0,
 								}
 								catalogMap.set(incoming.id, newEntry)
 							}
@@ -305,7 +359,7 @@ export const useModelStore = create<ModelStore>()(
 			resetStore: () => set({ ...DEFAULT_STATE }),
 		}),
 		{
-			name: 'artlens-model-store',
+			name: STORAGE_INSTANCE_IDS.MODELS,
 			storage: createJSONStorage(() => _storageAdapter),
 		}
 	)

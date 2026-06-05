@@ -62,17 +62,17 @@ const tracker = createTracker('refine_screen')
 // ─────────────────────────────────────────────────────────────────────────────
 
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	surfaceHigh: '#F2F2F7',
+	border: '#E5E5EA',
+	primary: '#7B61FF',
+	primaryMid: '#7B61FF',
 	primaryLight: '#A291FF',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	success: '#10B981',
+	text: '#1C1C1E',
+	textMuted: '#8E8E93',
+	textDim: '#AEAEB2',
+	success: '#34C759',
 	white: '#FFFFFF',
 } as const
 
@@ -561,7 +561,7 @@ const styles = StyleSheet.create({
 	// ── Canvas ────────────────────────────────────────────────────────────────
 	canvasWrap: {
 		alignSelf: 'center',
-		backgroundColor: '#050508',
+		backgroundColor: '#000000',
 		overflow: 'hidden',
 	},
 	imageLoadOverlay: {
@@ -570,7 +570,7 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 		gap: 12,
 		zIndex: 10,
-		backgroundColor: '#050508',
+		backgroundColor: C.bg,
 	},
 	modeBadgeRow: {
 		position: 'absolute',

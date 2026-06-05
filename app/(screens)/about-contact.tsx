@@ -39,14 +39,13 @@ import { router } from 'expo-router'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
 import {
-	Award,
 	ChevronLeft,
-	Globe,
+	//Globe,
 	Mail,
-	MessageCircle,
+	//MessageCircle,
 	Send,
 	Sparkles,
-	Star,
+	//Star,
 	Twitter,
 } from 'lucide-react-native'
 
@@ -315,7 +314,7 @@ export default function AboutContactScreen(): React.JSX.Element {
 				</View>
 
 				{/* ── Stats ─────────────────────────────────────────────────── */}
-				<View style={styles.statsRow}>
+				{/*<View style={styles.statsRow}>
 					<StatBox
 						icon={
 							<MessageCircle
@@ -352,7 +351,7 @@ export default function AboutContactScreen(): React.JSX.Element {
 					/>
 				</View>
 
-				<Divider />
+				<Divider />*/}
 
 				{/* ── Vision ────────────────────────────────────────────────── */}
 				<View style={styles.section}>
@@ -509,15 +508,8 @@ export default function AboutContactScreen(): React.JSX.Element {
 
 				{/* ── Footer ────────────────────────────────────────────────── */}
 				<View style={styles.footer}>
-					<View style={styles.awardRow}>
-						<Award color={C.textDim} size={13} strokeWidth={1.5} />
-						<Text style={styles.footerText}>
-							{APP_INFO.awardBadge}
-						</Text>
-					</View>
 					<Text style={styles.footerSub}>
-						v{APP_INFO.version} · Built with ❤️ by {APP_INFO.name}{' '}
-						Inc.
+						v{APP_INFO.version} · Built by {APP_INFO.name} Inc.
 					</Text>
 				</View>
 			</ScrollView>

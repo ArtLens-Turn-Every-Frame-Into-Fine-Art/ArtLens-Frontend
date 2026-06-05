@@ -23,7 +23,6 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import {
 	View,
 	Text,
-	FlatList,
 	TouchableOpacity,
 	StyleSheet,
 	StatusBar,
@@ -31,7 +30,6 @@ import {
 	ActivityIndicator,
 	Platform,
 	Animated,
-	ListRenderItemInfo,
 	Alert,
 	ScrollView,
 	TextInput,
@@ -73,7 +71,7 @@ const NUM_COLUMNS = 2
 const CARD_WIDTH =
 	(SCREEN_WIDTH - H_PADDING * 2 - COLUMN_GAP * (NUM_COLUMNS - 1)) /
 	NUM_COLUMNS
-const CARD_HEIGHT = CARD_WIDTH * 1.35
+//const CARD_HEIGHT = CARD_WIDTH * 1.35
 
 const CATEGORIES = ['All', 'Popular', 'New', 'Downloaded']
 
@@ -448,24 +446,24 @@ export default function StyleSelectionScreen({
 	}, [selectedStyleId, isEnqueuing, sourceUri, router])
 
 	// ── FlatList renderItem ────────────────────────────────────────────────────
-	const renderStyleCard = useCallback(
-		({ item }: ListRenderItemInfo<StyleModel>): React.ReactElement => {
-			const isSelected = item.id === selectedStyleId
-			const progressPercent = progressByStyleId.get(item.id) ?? null
+	//const renderStyleCard = useCallback(
+	//	({ item }: ListRenderItemInfo<StyleModel>): React.ReactElement => {
+	//		const isSelected = item.id === selectedStyleId
+	//		const progressPercent = progressByStyleId.get(item.id) ?? null
 
-			return (
-				<StyleCard
-					model={item}
-					isSelected={isSelected}
-					progressPercent={progressPercent}
-					onPress={handleStylePress}
-				/>
-			)
-		},
-		[selectedStyleId, progressByStyleId, handleStylePress]
-	)
+	//		return (
+	//			<StyleCard
+	//				model={item}
+	//				isSelected={isSelected}
+	//				progressPercent={progressPercent}
+	//				onPress={handleStylePress}
+	//			/>
+	//		)
+	//	},
+	//	[selectedStyleId, progressByStyleId, handleStylePress]
+	//)
 
-	const keyExtractor = useCallback((item: StyleModel): string => item.id, [])
+	//const keyExtractor = useCallback((item: StyleModel): string => item.id, [])
 
 	// ── Error fallback guard ───────────────────────────────────────────────────
 	if (
@@ -676,12 +674,7 @@ export default function StyleSelectionScreen({
 			</ScrollView>
 
 			{/* ── Sticky action bar ── */}
-			<View
-				style={[
-					styles.actionBar,
-					{ paddingBottom: Math.max(insets.bottom, 16) + 8 },
-				]}
-			>
+			<View style={[styles.actionBar, { paddingBottom: 18 }]}>
 				{selectedModel ? (
 					<View style={styles.actionBarInfo}>
 						<Text
@@ -691,9 +684,10 @@ export default function StyleSelectionScreen({
 							{selectedModel.name}
 						</Text>
 						<Text style={styles.actionBarStyleHint}>
-							{selectedModel.description.length > 60
-								? selectedModel.description.slice(0, 57) + '…'
-								: selectedModel.description}
+							{(selectedModel.description?.length ?? 0) > 60
+								? selectedModel.description?.slice(0, 57) + '…'
+								: (selectedModel.description ??
+									'No description available')}
 						</Text>
 					</View>
 				) : (

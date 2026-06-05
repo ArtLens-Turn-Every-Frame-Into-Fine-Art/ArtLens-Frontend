@@ -58,21 +58,22 @@ import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('Background-Generator')
 
-// — Design tokens — dark palette matching app-wide theme ——————————————————————
+// — Design tokens — light palette matching app-wide theme —————————————————————
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	surfaceHigh: '#F2F2F7',
+	border: '#E5E5EA',
+	primary: '#7B61FF',
+	primaryMid: '#7B61FF',
 	primaryLight: '#A291FF',
-	accent: '#C026D3',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	warning: '#D97706',
-	success: '#00FF94',
+	accent: '#FF7675',
+	text: '#1C1C1E',
+	textMuted: '#8E8E93',
+	textDim: '#AEAEB2',
+	warning: '#FF9F0A',
+	warningSoft: '#FFF5E6',
+	success: '#34C759',
 	white: '#FFFFFF',
 } as const
 
@@ -676,7 +677,7 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		paddingHorizontal: 20,
 		paddingTop: 14,
-		backgroundColor: `${C.surface}F5`,
+		backgroundColor: `${C.surface}F8`,
 		borderTopWidth: StyleSheet.hairlineWidth,
 		borderTopColor: C.border,
 		gap: 12,

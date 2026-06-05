@@ -48,7 +48,7 @@ import {
 } from '@shopify/react-native-skia'
 import { File, Paths } from 'expo-file-system'
 import { TensorShape } from '@/types'
-import { DEFAULT_MODEL_CONFIG } from '@/shared/utils/constants'
+import { OUTPUT_JPEG_QUALITY } from '@/shared/utils/constants'
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('SkiaRenderer')
@@ -89,6 +89,24 @@ export class SkiaRenderer {
 	private _totalFramesRendered = 0
 	private _activeCacheKeys: string[] = []
 
+	/**
+	 * Per-instance cache for the RGBA destination buffer used by compositeStyleFrame.
+	 *
+	 * BUG 3 FIX: compositeStyleFrame previously allocated `new Uint8Array(totalByteAllocation)`
+	 * on every call. On a 512×512 frame at 4 bytes/pixel that is a 1 MB object discarded each
+	 * frame — at 30 fps this produces ~30 MB/s of GC-eligible heap churn, causing perceptible
+	 * frame drops and GC pauses on lower-end devices.
+	 *
+	 * Fix: cache the last-allocated buffer keyed by its byte length. The viewfinder always
+	 * runs at a fixed resolution, so the very first call allocates and every subsequent call
+	 * is a Map hit with zero allocation. If the resolution changes (e.g. switching from
+	 * preview to main slot), the new size is allocated once and cached.
+	 *
+	 * The cache is intentionally instance-level (not module-level) so that multiple
+	 * SkiaRenderer instances do not share mutable state.
+	 */
+	private _rgbaByteCache = new Map<number, Uint8Array>()
+
 	constructor() {
 		this._sharedPaint = Skia.Paint()
 		this._sharedPaint.setAntiAlias(true)
@@ -113,11 +131,11 @@ export class SkiaRenderer {
 	 *     (e.g., via stitchTiles() or decodeModelOutput()).
 	 *
 	 * CHANNEL LAYOUT:
-	 *   outputTensor must be NHWC with batch dimension removed: [H, W, 3] interleaved.
-	 *   For teacher: length = 512 × 512 × 3 = 786,432 floats.
-	 *   For student: length = 256 × 256 × 3 = 196,608 floats.
-	 *   The shape parameter drives the Skia image info — width and height must
-	 *   match the model's tile resolution (512 or 256).
+	 *   outputTensor must be NHWC with batch dimension removed: [H, W, C] interleaved.
+	 *   C is always 3 (RGB) for current CUT-architecture models; the stride is derived
+	 *   from shape[3] at runtime, not assumed. The output rawBytes buffer is always
+	 *   4 bytes/pixel (RGBA/BGRA) to satisfy Skia's RGBA_8888 / BGRA_8888 colorType
+	 *   contract regardless of the tensor's source channel count.
 	 */
 	public compositeStyleFrame(
 		canvas: SkCanvas,
@@ -127,39 +145,96 @@ export class SkiaRenderer {
 	): RenderingContextMetrics {
 		const startTime = Date.now()
 
-		// FIXED: Skipped the unused batch parameter to eliminate the eslint error
+		// ── MANDATE 2: Runtime shape extraction ──────────────────────────────────
+		// shape layout: [Batch, Height, Width, Channels] (standard TFLite NHWC).
+		// `channels` is the SOURCE stride into the tensor (3 for RGB model output).
+		// It must never be used as the Skia destination stride — see SKIA_BPP below.
 		const [, height, width, channels] = shape
 
-		const blendRatio =
-			options.luminanceBlend ?? DEFAULT_MODEL_CONFIG.luminanceBlend
+		// Defensive bounds: tensor must exactly cover the declared shape.
+		const expectedElements = width * height * channels
+		if (outputTensor.length !== expectedElements) {
+			throw new Error(
+				`[SkiaRenderer] compositeStyleFrame: tensor/shape mismatch. ` +
+					`Expected ${expectedElements} elements (${width}×${height}×${channels}) ` +
+					`from shape, got ${outputTensor.length}. ` +
+					`Ensure the caller passes the live model config resolution, not a compile-time default.`
+			)
+		}
+
+		// ── MANDATE 1: No DEFAULT_MODEL_CONFIG reference ──────────────────────────
+		// Inline fallback mirrors the engine default without a static import binding.
+		const blendRatio = options.luminanceBlend ?? 0.75
 		this._sharedPaint.setAlphaf(blendRatio)
 
-		// Determine which denormalization formula to apply.
-		// tensorIsRaw defaults to true — both models produce raw Tanh output.
 		const tensorIsRaw = options.tensorIsRaw !== false
 
-		// Convert raw float32 model output into display-ready RGBA bytes.
-		const totalByteAllocation = width * height * channels
-		const rawBytes = new Uint8Array(totalByteAllocation)
+		// ── MANDATE 2: Dynamic byte allocation ───────────────────────────────────
+		// Skia's RGBA_8888 and BGRA_8888 colorTypes unconditionally require 4 bytes
+		// per pixel. Allocating `width * height * channels` (i.e. 3 bytes/pixel for
+		// RGB tensors) and passing it with an RGBA colorType causes Skia to read
+		// the first byte of the next pixel's R channel as the current pixel's alpha,
+		// corrupting every pixel boundary in the image.
+		//
+		// SKIA_BPP is a renderer-local constant — it is the DESTINATION stride and
+		// is entirely decoupled from `channels` (the SOURCE tensor stride).
+		const SKIA_BPP = 4
+		const totalPixels = width * height
+		const totalByteAllocation = totalPixels * SKIA_BPP
+
+		// BUG 3 FIX: reuse the cached buffer for this byte length; allocate only on first call
+		// or when resolution changes. Zero allocation on the hot viewfinder steady-state path.
+		let rawBytes = this._rgbaByteCache.get(totalByteAllocation)
+		if (!rawBytes) {
+			rawBytes = new Uint8Array(totalByteAllocation)
+			this._rgbaByteCache.set(totalByteAllocation, rawBytes)
+		}
 
 		if (tensorIsRaw) {
-			// FIX A: Raw Tanh output in [-1, 1].
-			// Denormalization: (v + 1.0) * 127.5   maps -1 → 0, 0 → 127.5, 1 → 255.
-			// This is the inverse of CUT training normalization:
-			//   (pixel/255 − 0.5) / 0.5 = pixel/127.5 − 1.0   →   [-1, 1]
-			for (let i = 0; i < outputTensor.length; i++) {
-				const v = (outputTensor[i] + 1.0) * 127.5
-				rawBytes[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+			// FIX A: Inverse CUT normalization for raw Tanh output in [-1, 1].
+			// (v + 1.0) * 127.5  →  maps  -1 → 0 | 0 → 127.5 | +1 → 255
+			//
+			// Per-pixel loop with explicit srcBase / dstBase:
+			//   srcBase strides by `channels`  (3 for RGB tensor)
+			//   dstBase strides by SKIA_BPP    (4 for RGBA destination)
+			// This correctly handles any square or rectangular shape configuration.
+			for (let p = 0; p < totalPixels; p++) {
+				const srcBase = p * channels
+				const dstBase = p * SKIA_BPP
+
+				let v = (outputTensor[srcBase] + 1.0) * 127.5
+				rawBytes[dstBase] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				v = (outputTensor[srcBase + 1] + 1.0) * 127.5
+				rawBytes[dstBase + 1] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				v = (outputTensor[srcBase + 2] + 1.0) * 127.5
+				rawBytes[dstBase + 2] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				// Alpha channel: fully opaque — models produce no transparency signal.
+				rawBytes[dstBase + 3] = 255
 			}
 		} else {
 			// Already decoded to [0, 1] (e.g., from decodeModelOutput or stitchTiles).
-			// Simple scale: v * 255, clamped.
-			for (let i = 0; i < outputTensor.length; i++) {
-				const v = outputTensor[i] * 255
-				rawBytes[i] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+			// Simple scale: v * 255, clamped — no shift required.
+			for (let p = 0; p < totalPixels; p++) {
+				const srcBase = p * channels
+				const dstBase = p * SKIA_BPP
+
+				let v = outputTensor[srcBase] * 255
+				rawBytes[dstBase] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				v = outputTensor[srcBase + 1] * 255
+				rawBytes[dstBase + 1] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				v = outputTensor[srcBase + 2] * 255
+				rawBytes[dstBase + 2] = v < 0 ? 0 : v > 255 ? 255 : v | 0
+
+				rawBytes[dstBase + 3] = 255
 			}
 		}
 
+		// ── Skia image construction ───────────────────────────────────────────────
 		const skiaData = Skia.Data.fromBytes(rawBytes)
 		const imageInfo = {
 			width,
@@ -171,10 +246,15 @@ export class SkiaRenderer {
 			alphaType: AlphaType.Opaque,
 		}
 
+		// Row stride passed to MakeImage must match the DESTINATION byte width
+		// (SKIA_BPP = 4), NOT the tensor's source channel count.
+		// Passing `width * channels` (= width * 3) here was the original stride
+		// corruption vector — Skia would silently misalign every row by 1 byte per
+		// pixel column, producing a diagonal shear artefact at non-trivial widths.
 		const skiaImage = Skia.Image.MakeImage(
 			imageInfo,
 			skiaData,
-			width * channels
+			width * SKIA_BPP
 		)
 		if (!skiaImage) {
 			throw new Error(
@@ -182,6 +262,7 @@ export class SkiaRenderer {
 			)
 		}
 
+		// ── Draw pass ─────────────────────────────────────────────────────────────
 		if (options.clippingBounds) {
 			const destinationRect = Skia.XYWHRect(
 				0,
@@ -203,7 +284,8 @@ export class SkiaRenderer {
 
 		return {
 			drawDurationMs: Date.now() - startTime,
-			// FIXED: Uses the processed byte length directly ensuring type-safety
+			// rawBytes.length is the post-expansion RGBA byte count — the truthful
+			// allocated footprint this frame contributed to the native heap.
 			allocatedBufferBytes: rawBytes.length,
 			compositionPasses: this._totalFramesRendered,
 		}
@@ -327,7 +409,7 @@ export class SkiaRenderer {
 			const maskPaint = Skia.Paint()
 			maskPaint.setAntiAlias(true)
 			maskPaint.setBlendMode(BlendMode.DstIn)
-			maskPaint.setStyle(1 /* Fill */)
+			maskPaint.setStyle(0 /* Fill — PaintStyle.Fill = 0, Stroke = 1 */)
 			maskPaint.setColor(Skia.Color('white'))
 			// Stroke the path with a thick brush so filled areas are opaque
 			maskPaint.setStrokeWidth(35)
@@ -346,7 +428,10 @@ export class SkiaRenderer {
 				)
 			}
 
-			const jpegBytes = snapshot.encodeToBytes(ImageFormat.JPEG, 90)
+			const jpegBytes = snapshot.encodeToBytes(
+				ImageFormat.JPEG,
+				OUTPUT_JPEG_QUALITY
+			)
 			if (!jpegBytes) {
 				throw new Error(
 					'[SkiaRenderer] encodeToBytes() returned null — image encoding failed.'
@@ -423,5 +508,6 @@ export class SkiaRenderer {
 		this._sharedPaint.dispose()
 		this._activeCacheKeys = []
 		this._totalFramesRendered = 0
+		this._rgbaByteCache.clear()
 	}
 }

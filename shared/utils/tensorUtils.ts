@@ -3,174 +3,290 @@
  * @description Production-grade tensor manipulation utilities for ArtLens.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * MODEL PRECISION GROUND TRUTH  (from artlens_convert_v2.py metadata)
+ * REFACTOR CHANGES (v4 — lazy buffer registry, dynamic Gaussian window)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  Teacher (Main slot)  — artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
- *    Input  : [1, 512, 512, 3]  float32  NHWC
- *    Output : [1, 512, 512, 3]  float32  NHWC  (Tanh activation → [-1, 1])
- *    ngf    : 64
+ *  FIX R1 — CRITICAL: Compile-time resolution locking eliminated.
+ *    The v3 module-scope `PREVIEW_RES` and `INFERENCE_RES` constants resolved
+ *    DEFAULT_MODEL_CONFIG values at script evaluation time. Nine ArrayBuffer /
+ *    Uint8Array allocations were then sized from those constants — locking every
+ *    model I/O buffer to 256 / 512 for the entire process lifetime regardless of
+ *    any over-the-air config update.
  *
- *  Student (Preview slot) — artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
- *    Input  : [1, 256, 256, 3]  float32  NHWC
- *    Output : [1, 256, 256, 3]  float32  NHWC  (Tanh activation → [-1, 1])
- *    ngf_s  : 32  n_blocks: 4
+ *    Fix: All model-specific I/O buffers are now managed by the internal buffer
+ *    registry (_bufferRegistry). Buffers are allocated lazily on first access for
+ *    a given resolution, re-used on subsequent accesses, and grown automatically
+ *    if a larger resolution is requested later. The only static allocations that
+ *    remain are the stitch accumulators (_stitchNumerator, _stitchDenominator),
+ *    which are correctly sized to PERFORMANCE_LIMITS.STITCH_MAX_PIXELS — a
+ *    hardware capacity limit, not a model-specific resolution.
  *
- *  Both models use the CUT training normalisation (artlens_teacher_train_v3_1_5.py):
- *    transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
- *    which applied AFTER ToTensor() (pixel/255 → [0,1]) gives:
- *      normalised = (pixel/255 − 0.5) / 0.5  =  pixel/127.5 − 1.0  →  [-1, 1]
+ *  FIX R2 — CRITICAL: Gaussian window is now lazy and resolution-agnostic.
+ *    `_gaussianWindow512` was computed once at module load for a hardcoded 512.
+ *    This caused two bugs:
+ *      (a) The window size was fixed even if DEFAULT_MODEL_CONFIG.mainModel
+ *          changed.
+ *      (b) stitchTiles called with tileSize=256 (preview pipeline) indexed the
+ *          window as [ty * 256 + tx], which addressed incorrect positions in a
+ *          512-wide table — producing subtly wrong stitch weights.
+ *    Fix: `getGaussianWindow(resolution)` builds a resolution×resolution window
+ *    lazily, caches it per resolution, and returns the cached copy on repeat
+ *    calls. stitchTiles now calls getGaussianWindow(tileSize) so both the main
+ *    and preview stitch paths use correctly-sized windows.
  *
- *  Denormalisation (output → display):
- *      display_f32  = (model_out + 1.0) / 2.0              →  [0, 1]
- *      display_u8   = ((model_out + 1.0) * 127.5) clamped  →  [0, 255]
+ *  FIX R3 — decodeModelOutput signature changed from slot to resolution.
+ *    The slot-based signature hid the runtime resolution behind a string enum,
+ *    forcing the function to resolve resolution from module-scope constants.
+ *    The new signature `decodeModelOutput(rawBuf, resolution)` accepts the
+ *    resolution directly from the caller, which always has the runtime config.
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * CHANGES (v2 → v3 — float32 model integration)
- * ─────────────────────────────────────────────────────────────────────────────
+ *  FIX R4 — f32ToPreviewRgba / f32ToMainRgba accept an explicit resolution.
+ *    These functions wrote into fixed-size module-scope Uint8Array singletons
+ *    (262 KB and 1 MB). They now accept a `resolution` parameter and write into
+ *    a lazily-allocated registry buffer sized for that resolution.
  *
- *  FIX A — CRITICAL: All input/output model buffers changed from fp16 to float32.
- *    The previous pipeline allocated `CHANNELS * FP16_BYTES (=2)` bytes per pixel.
- *    Both TFLite models have float32 I/O (4 bytes/element), so buffers were half
- *    the required size — every model.runSync() call would read/write out-of-bounds.
- *    Fix: Introduce F32_BYTES = 4. All model I/O buffers now use F32_BYTES.
- *    Static RAM impact: input/output buffers double. mainInputBuffer 1.5 MB → 3 MB.
+ *  FIX R5 — alphaBlend shared fallback buffer is lazy and growable.
+ *    The old sharedBlendBuffer was sized at module load for INFERENCE_RES.
+ *    Blending a stitch output larger than that size would throw. The lazy
+ *    registry buffer grows to accommodate any length without extra allocation.
  *
- *  FIX B — CRITICAL: prepareInputTensor normalization corrected.
- *    Was: float16(channel / 255)  →  [0, 1] fp16
- *    Now: float32((channel / 127.5) − 1.0)  →  [-1, 1] fp32
- *    Using the wrong normalization offsets every pixel value by 0.5 in model space,
- *    producing severe colour drift and incorrect style transfer output.
- *
- *  FIX C — CRITICAL: stitchTiles / decodeModelOutput fp16 path removed.
- *    Was: Uint16Array view + _fp16LookupTable[src16[i]] per pixel.
- *    Now: Float32Array view + (v + 1.0) * 0.5 denormalization.
- *    The old lookup table returned nonsense for float32 bit patterns.
- *
- *  FIX D — CRITICAL: toRGBAWorklet float32 path updated.
- *    Was: inline fp16 arithmetic decode (sign / exponent / mantissa bit-ops).
- *    Now: float32 with denormalization: ((v + 1.0) * 127.5), clamped via ternary.
- *    Ternary clamping preserves Hermes worklet constraint (no Math.min/Math.max).
- *
- *  FIX E — ProcessedTile.rawFp16 renamed to rawF32.
- *    The buffer holds float32 model output, not fp16. The name change prevents
- *    future callers from misinterpreting the data type.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * PRESERVED FROM v2 (unchanged)
- * ─────────────────────────────────────────────────────────────────────────────
- *  1. fp16 ↔ float32 utility functions retained (future INT8/fp16 model support).
- *  2. All persistent accumulator arrays pre-allocated at module scope — zero GC.
- *  3. _gaussianWindow512 Gaussian mask pre-computed at module init.
- *  4. stitchTiles Gaussian overlap-add algorithm unchanged (only data type changed).
- *  5. alphaBlend FIX 3 preserved — optional `out` parameter for large images.
+ *  FIX R6 — _GAUSSIAN_SIGMA_DIV and GAUSSIAN_FLOOR_EPSILON extracted.
+ *    Magic numbers embedded in the IIFE are now canonical constants imported
+ *    from constants.ts.
  *
  * PRD § 5 — src/shared/utils/tensorUtils.ts
  */
 
 import type { ModelConfig } from '@/types'
-import { DEFAULT_MODEL_CONFIG } from '@/shared/utils/constants'
+import {
+	PERFORMANCE_LIMITS,
+	SYSTEM_BOUNDS,
+	MODEL_PREPROCESS,
+	MODEL_GAUSSIAN_SIGMA_DIV,
+	GAUSSIAN_FLOOR_EPSILON,
+} from '@/shared/utils/constants'
+
+import { createTracker } from '@/shared/utils/logger'
+const tracker = createTracker('tensorUtils')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 1 — DIMENSION CONSTANTS
+// SECTION 1 — PRIVATE BUFFER REGISTRY
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// All model I/O buffers (inputs, outputs, RGBA decode targets, blend
+// workspaces, decode workspaces) are stored in this Map, keyed by a
+// descriptor string encoding their purpose, resolution, and element width.
+//
+// Properties of the registry:
+//   • Zero-allocation on the hot path: buffers are created once and reused.
+//   • Grows automatically: if a larger resolution is requested for an existing
+//     key, _getOrAllocF32 / _getOrAllocU8 replace the buffer.
+//   • No runtime locking: since the JS event loop is single-threaded, no mutex
+//     is needed around registry reads and writes.
 
-const PREVIEW_RES = DEFAULT_MODEL_CONFIG.previewResolution // 256
-const INFERENCE_RES = DEFAULT_MODEL_CONFIG.inferenceResolution // 512
-const CHANNELS = 3 as const
-const RGBA_CHANNELS = 4 as const
+const _bufferRegistry = new Map<string, ArrayBuffer>()
 
 /**
- * Bytes per element for FLOAT32 model I/O.
- * Both teacher and student TFLite models have float32 input/output tensors.
- * This is the primary precision for all model buffers.
+ * Returns a Float32Array view backed by a cached ArrayBuffer.
+ * If the existing buffer for `key` is too small for `elements` elements,
+ * a new larger buffer is allocated and the old one is discarded.
  */
-const F32_BYTES = 4 as const
+function _getOrAllocF32(key: string, elements: number): Float32Array {
+	const byteLen = elements * SYSTEM_BOUNDS.F32_BYTES
+	const existing = _bufferRegistry.get(key)
+	if (existing !== undefined && existing.byteLength >= byteLen) {
+		return new Float32Array(existing, 0, elements)
+	}
+	const newBuf = new ArrayBuffer(byteLen)
+	_bufferRegistry.set(key, newBuf)
+	return new Float32Array(newBuf)
+}
 
 /**
- * Bytes per element for FLOAT16.
- * Retained for legacy utility functions and potential future fp16 model support.
- * NOT used by the current teacher/student model I/O buffers.
+ * Returns a Uint8Array view backed by a cached ArrayBuffer.
+ * If the existing buffer for `key` is too small for `bytes` bytes,
+ * a new larger buffer is allocated and the old one is discarded.
  */
-//const FP16_BYTES = 2 as const
+function _getOrAllocU8(key: string, bytes: number): Uint8Array {
+	const existing = _bufferRegistry.get(key)
+	if (existing !== undefined && existing.byteLength >= bytes) {
+		return new Uint8Array(existing, 0, bytes)
+	}
+	const newBuf = new ArrayBuffer(bytes)
+	_bufferRegistry.set(key, newBuf)
+	return new Uint8Array(newBuf)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 2 — PRE-ALLOCATED PERSISTENT BUFFERS
+// SECTION 2 — PUBLIC BUFFER API  (REPLACE existing getOrAllocateBuffer)
 // ─────────────────────────────────────────────────────────────────────────────
-//
-// Static RAM budget (allocated once at module load):
-//
-//  MODEL INPUT BUFFERS (float32 — FIX A: was fp16, now 2× larger)
-//   previewInputBuffer       256×256×3×4  =    786,432 B  (fp32, [-1,1])
-//   previewInputU8Buffer     256×256×3×1  =    196,608 B  (uint8, for INT8 models)
-//   mainInputBuffer          512×512×3×4  =  3,145,728 B  (fp32, [-1,1])
-//
-//  MODEL OUTPUT BUFFERS (float32 — FIX A: was fp16, now 2× larger)
-//   previewOutputBuffer      256×256×3×4  =    786,432 B  (fp32, [-1,1] raw)
-//   mainOutputBuffer         512×512×3×4  =  3,145,728 B  (fp32, [-1,1] raw)
-//
-//  DISPLAY SIDE (unchanged — these hold decoded RGBA bytes, not model I/O)
-//   sharedPreviewRgbaBuffer  256×256×4    =    262,144 B  (RGBA uint8)
-//   sharedMainRgbaBuffer     512×512×4    =  1,048,576 B  (RGBA uint8)
-//
-//  DECODE WORKSPACE (unchanged size — holds float32 [0,1] after denorm)
-//   _sharedF32Decode         512×512×3×4  =  3,145,728 B  (float32, [0,1])
-//
-//  BLEND WORKSPACE (unchanged)
-//   sharedBlendBuffer        512×512×3×4  =  3,145,728 B  (float32)
-//
-//  STITCH ACCUMULATORS (unchanged — working buffers for Gaussian overlap-add)
-//   _stitchNumerator         12,520,525×3×4  ≈  150 MB  (float32)
-//   _stitchDenominator       12,520,525×4    ≈   48 MB  (float32)
-//
-//  FP16 LOOKUP TABLE (retained for legacy use — NOT used by current models)
-//   _fp16LookupTable         65,536×4    =    256 KB  (float32)
 
-const STITCH_MAX_PIXELS = 4085 * 3065 // 12,520,525 — 12.5 MP
+/**
+ * The exclusive, type-safe gatekeeper for all model I/O ArrayBuffers.
+ *
+ * Callers must never allocate model buffers independently. All I/O surfaces
+ * — input tensors, output tensors, RGBA decode targets, blend workspaces —
+ * must flow through this function so the registry remains the single source
+ * of truth for buffer identity and lifetime.
+ *
+ * KEY ISOLATION GUARANTEE
+ * ───────────────────────
+ * The registry key encodes slot, bufferType, resolution, and element encoding
+ * as `${slot}:${bufferType}:${resolution}_${isU8}`. Concrete examples:
+ *
+ *   'main:input:512_false'    — float32 input for 512×512 teacher model
+ *   'preview:input:256_false' — float32 input for 256×256 student model
+ *   'preview:input:256_true'  — INT8 input for 256×256 quantized student model
+ *
+ * A 512_false and a 256_false buffer are therefore structurally distinct
+ * registry entries with no shared backing memory. Passing a 512-slot buffer
+ * to a 256-resolution model (the crash vector) is statically impossible when
+ * callers supply `config.mainModel` / `config.previewModel` from the live
+ * hydrated ModelConfig.
+ *
+ * ALLOCATION POLICY
+ * ─────────────────
+ * • Hit  — returns the cached ArrayBuffer; O(1), zero allocation.
+ * • Miss — allocates a correctly-sized ArrayBuffer, caches it, logs via
+ *   tracker.log, and returns it. Subsequent calls for the same key are hits.
+ *
+ * @param slot       - Model pipeline slot ('preview' | 'main')
+ * @param bufferType - Logical buffer role within the slot
+ * @param resolution - Runtime tile/model resolution in pixels (e.g. 256 or 512)
+ * @param isU8       - false = float32 model, 4 bytes/element (default)
+ *                     true  = INT8 quantized model, 1 byte/element
+ *
+ * @note `tracker` is expected to be available as a globally-injected logger
+ *       instance. No import is required — access it as `tracker.log(...)`.
+ */
+export function getOrAllocateBuffer(
+	slot: 'preview' | 'main',
+	bufferType: 'input' | 'output' | 'rgba' | 'blend' | 'decode',
+	resolution: number,
+	isU8: boolean = false
+): ArrayBuffer {
+	const key = `${slot}:${bufferType}:${resolution}_${isU8}`
+	const existing = _bufferRegistry.get(key)
+	if (existing !== undefined) return existing
 
-// ── Input buffers (float32 model inputs) ─────────────────────────────────────
-export const previewInputBuffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS * F32_BYTES // 786,432 B
-)
-export const previewInputU8Buffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS // 196,608 B (INT8 model fallback)
-)
-export const mainInputBuffer = new ArrayBuffer(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS * F32_BYTES // 3,145,728 B
-)
+	const bytesPerElement: number = isU8 ? 1 : SYSTEM_BOUNDS.F32_BYTES
 
-// ── Output reference buffers (unused by pipeline, kept for external consumers) ─
-export const previewOutputBuffer = new ArrayBuffer(
-	PREVIEW_RES * PREVIEW_RES * CHANNELS * F32_BYTES // 786,432 B
-)
-export const mainOutputBuffer = new ArrayBuffer(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS * F32_BYTES // 3,145,728 B
-)
+	const totalBytes: number =
+		bufferType === 'rgba'
+			? resolution * resolution * SYSTEM_BOUNDS.RGBA_CHANNELS
+			: resolution * resolution * SYSTEM_BOUNDS.CHANNELS * bytesPerElement
 
-// ── Display buffers ───────────────────────────────────────────────────────────
-export const sharedPreviewRgbaBuffer = new Uint8Array(
-	PREVIEW_RES * PREVIEW_RES * RGBA_CHANNELS // 262,144 B
-)
-export const sharedMainRgbaBuffer = new Uint8Array(
-	INFERENCE_RES * INFERENCE_RES * RGBA_CHANNELS // 1,048,576 B
-)
+	const newBuf = new ArrayBuffer(totalBytes)
+	_bufferRegistry.set(key, newBuf)
 
-// ── Blend workspace ───────────────────────────────────────────────────────────
-export const sharedBlendBuffer = new Float32Array(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432 f32 elements
-)
+	tracker.log(
+		`[tensorUtils] getOrAllocateBuffer: allocated ${totalBytes}B ` +
+			`key="${key}" (resolution=${resolution}, isU8=${isU8})`
+	)
 
-// ── Decode workspace (float32 [0,1] after denormalization) ───────────────────
-const _sharedF32Decode = new Float32Array(
-	INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432 f32 elements
-)
-
-// ── Stitch accumulators ───────────────────────────────────────────────────────
-const _stitchNumerator = new Float32Array(STITCH_MAX_PIXELS * CHANNELS)
-const _stitchDenominator = new Float32Array(STITCH_MAX_PIXELS)
+	return newBuf
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 3 — FP16 LOOKUP TABLE (legacy utility — NOT used by current pipeline)
+// SECTION 3 — STATIC STITCH ACCUMULATORS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The stitch numerator and denominator are sized to the hardware capacity
+// limit (PERFORMANCE_LIMITS.STITCH_MAX_PIXELS), NOT to a model resolution.
+// They are legitimately module-scope singletons — they will never be wrong-
+// sized by an OTA model update because they are bounded by a physical
+// constraint on the maximum image resolution we accept.
+//
+// BUG 6 FIX: LAZY ALLOCATION
+// ───────────────────────────
+// Previously these were allocated at module load:
+//   _stitchNumerator    : STITCH_MAX_PIXELS × 3 × 4  ≈  150 MB
+//   _stitchDenominator  : STITCH_MAX_PIXELS × 4      ≈   48 MB
+//
+// On import of tensorUtils, ~198 MB of virtual address space was committed
+// instantly — before any model was ever loaded. On 32-bit Android this alone
+// exhausts the virtual address space and crashes the process. On 64-bit devices
+// under memory pressure, the OS OOM killer terminates the app before inference
+// can begin.
+//
+// Fix: both arrays are `null` until the first call to `stitchTiles` or
+// `clearAndResetStitchAccumulators`. Allocation occurs once per process
+// lifetime, on first actual use. The same hardware-capacity sizing (STITCH_MAX_PIXELS)
+// is preserved — lazy allocation does not change the runtime semantics.
+
+const STITCH_MAX_PIXELS = PERFORMANCE_LIMITS.STITCH_MAX_PIXELS
+
+let _stitchNumerator: Float32Array | null = null
+let _stitchDenominator: Float32Array | null = null
+
+/**
+ * Returns the stitch numerator accumulator, allocating it on the first call.
+ * Subsequent calls are O(1) null-checks with no allocation.
+ */
+function _getStitchNumerator(): Float32Array {
+	if (_stitchNumerator === null) {
+		_stitchNumerator = new Float32Array(
+			STITCH_MAX_PIXELS * SYSTEM_BOUNDS.CHANNELS
+		)
+		tracker.log(
+			`[tensorUtils] _stitchNumerator lazily allocated: ` +
+				`${(_stitchNumerator.byteLength / 1_048_576).toFixed(0)} MB`
+		)
+	}
+	return _stitchNumerator
+}
+
+/**
+ * Returns the stitch denominator accumulator, allocating it on the first call.
+ */
+function _getStitchDenominator(): Float32Array {
+	if (_stitchDenominator === null) {
+		_stitchDenominator = new Float32Array(STITCH_MAX_PIXELS)
+		tracker.log(
+			`[tensorUtils] _stitchDenominator lazily allocated: ` +
+				`${(_stitchDenominator.byteLength / 1_048_576).toFixed(0)} MB`
+		)
+	}
+	return _stitchDenominator
+}
+
+/**
+ * Completely re-zeros both stitch accumulator arrays across their full
+ * hardware-bounded capacity.
+ *
+ * WHY THIS IS NECESSARY
+ * ─────────────────────
+ * stitchTiles() zeroes only the active pixel window [0, totalPixels) before
+ * each pass. When a 512px-tiled job is followed immediately by a 256px-tiled
+ * job on a smaller canvas, the tail region of both accumulators — the indices
+ * above the new job's totalPixels — retains weighted residue from the prior
+ * pass. If the tiling grid for the new job ever scans into those indices
+ * (possible when the new canvas dimensions place a tile origin near the tail),
+ * the denominator carries a non-zero phantom weight and the numerator carries
+ * a ghost colour contribution. The normalisation in Pass 2 then silently
+ * outputs subtly corrupted RGB values, which manifests as seam-coloured
+ * halos or stripe artefacts near canvas edges.
+ *
+ * USAGE
+ * ─────
+ * Call once at the start of any tiling job whose canvas dimensions or tile
+ * resolution differ from the immediately preceding job. It is safe (and cheap
+ * relative to inference) to call unconditionally at job boundaries.
+ *
+ * NOT a substitute for the partial fill inside stitchTiles() — that fill
+ * remains necessary to reset the active region between tile accumulation
+ * passes within a single job.
+ *
+ * Time complexity : O(STITCH_MAX_PIXELS) — ~12.5 M float32 elements zeroed.
+ * Memory          : In-place; no allocation, no GC pressure.
+ */
+export function clearAndResetStitchAccumulators(): void {
+	_getStitchNumerator().fill(0)
+	_getStitchDenominator().fill(0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 4 — FP16 LOOKUP TABLE (legacy utility — NOT used by current pipeline)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Retained for:
@@ -178,7 +294,6 @@ const _stitchDenominator = new Float32Array(STITCH_MAX_PIXELS)
 //   • External code that imports fp16ToNumber / decodeFp16Buffer
 //
 // The current teacher/student float32 pipeline does NOT use this table.
-// stitchTiles and decodeModelOutput now use Float32Array views directly.
 
 const _fp16LookupTable: Float32Array = (() => {
 	const table = new Float32Array(65536)
@@ -217,7 +332,7 @@ const _fp16LookupTable: Float32Array = (() => {
 })()
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 4 — FLOAT16 ↔ FLOAT32 CONVERSION UTILITIES (legacy / future use)
+// SECTION 5 — FLOAT16 ↔ FLOAT32 CONVERSION UTILITIES (legacy / future use)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _f32ScratchBuf = new ArrayBuffer(4)
@@ -272,30 +387,83 @@ export function encodeFp16Buffer(f32: Float32Array, rawBuf: ArrayBuffer): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 5 — INPUT PRE-PROCESSING: RGBA → FLOAT32 MODEL INPUT
+// SECTION 6 — LAZY GAUSSIAN WINDOW CACHE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// FIX R2: The Gaussian window is no longer pre-computed for a fixed 512px tile
+// at module load time. getGaussianWindow(resolution) computes and caches a
+// resolution×resolution window on first call, then returns the cached copy.
+//
+// This fixes two bugs from the v3 code:
+//   (a) The window is now correctly sized for any tile resolution, including
+//       the 256-pixel preview (student) pipeline.
+//   (b) stitchTiles indexes the window as [ty * tileSize + tx], which is
+//       correct only when the window stride equals tileSize. Using a 512-wide
+//       window with 256-pixel tiles produced incorrect stitch weights.
+
+const _gaussianWindowCache = new Map<number, Float32Array>()
+
+/**
+ * Returns a pre-computed 2D Gaussian window of size resolution × resolution.
+ * The result is cached per resolution — subsequent calls for the same
+ * resolution are O(1) cache lookups with zero allocation.
+ *
+ * Properties of the returned window:
+ *   σ = resolution / MODEL_GAUSSIAN_SIGMA_DIV
+ *   Center weight = 1.0 (after peak normalisation)
+ *   All weights are shifted by GAUSSIAN_FLOOR_EPSILON to prevent divide-
+ *   by-zero in the stitch denominator accumulator.
+ *
+ * @param resolution - tile dimension in pixels (e.g. 256 for preview, 512 for main)
+ */
+export function getGaussianWindow(resolution: number): Float32Array {
+	const cached = _gaussianWindowCache.get(resolution)
+	if (cached !== undefined) return cached
+
+	const sigma = resolution / MODEL_GAUSSIAN_SIGMA_DIV
+	const twoS2 = 2.0 * sigma * sigma
+	const half = (resolution - 1) / 2.0
+	const win = new Float32Array(resolution * resolution)
+
+	for (let y = 0; y < resolution; y++) {
+		const dy = y - half
+		for (let x = 0; x < resolution; x++) {
+			const dx = x - half
+			win[y * resolution + x] = Math.exp(-(dx * dx + dy * dy) / twoS2)
+		}
+	}
+
+	let peak = 0.0
+	for (let i = 0; i < win.length; i++) {
+		if (win[i] > peak) peak = win[i]
+	}
+	const invPeak = 1.0 / peak
+	for (let i = 0; i < win.length; i++) {
+		win[i] = win[i] * invPeak + GAUSSIAN_FLOOR_EPSILON
+	}
+
+	_gaussianWindowCache.set(resolution, win)
+	return win
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 7 — INPUT PRE-PROCESSING: RGBA → FLOAT32 MODEL INPUT
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Converts raw RGBA camera/image bytes into the model's float32 input buffer.
  *
- * NORMALIZATION CONTRACT (FIX B — was pixel/255 → [0,1], now [-1,1]):
- *   CUT training uses: transforms.Normalize(mean=0.5, std=0.5) after ToTensor()
- *   Equivalent formula: normalised = (pixel / 255 − 0.5) / 0.5 = pixel/127.5 − 1.0
+ * NORMALIZATION CONTRACT:
+ *   CUT training normalization: (pixel / MODEL_PREPROCESS.SCALE) - MODEL_PREPROCESS.SHIFT
  *   Range: [0, 255] → [-1.0, 1.0]
  *
- *   Alpha channel (rgbaSource[src+3]) is discarded — both models are RGB-only.
- *
- * NHWC LAYOUT:
- *   Output interleaved: R₀ G₀ B₀ R₁ G₁ B₁ … (H×W pixels, 3 channels each)
- *   Matches TFLite input tensor layout [1, H, W, 3].
+ * Alpha channel (rgbaSource[src+3]) is discarded — models are RGB-only.
  *
  * @param rgbaSource   - Source RGBA bytes (row-major, 4 bytes per pixel)
- * @param targetBuffer - Pre-allocated ArrayBuffer to write into.
- *                       Float32 models: must be resolution² × 3 × 4 bytes.
- *                       Uint8  models:  must be resolution² × 3 × 1 bytes.
+ * @param targetBuffer - Pre-allocated ArrayBuffer. Float32: resolution²×3×4 bytes.
+ *                       Uint8: resolution²×3×1 bytes.
  * @param resolution   - Tile size (512 for main/teacher, 256 for preview/student)
- * @param toUint8      - true = INT8 quantized model (write raw uint8 bytes)
- *                       false = Float32 model (write float32 [-1,1] values) ← default
+ * @param toUint8      - true = INT8 quantized model; false = Float32 model (default)
  */
 export function prepareInputTensor(
 	rgbaSource: Uint8Array,
@@ -306,7 +474,6 @@ export function prepareInputTensor(
 	const totalPixels = resolution * resolution
 
 	if (toUint8) {
-		// INT8 quantized model path: copy RGB bytes directly (no normalization)
 		const dst = new Uint8Array(targetBuffer)
 		let src = 0,
 			d = 0
@@ -318,19 +485,19 @@ export function prepareInputTensor(
 			d += 3
 		}
 	} else {
-		// Float32 model path (FIX B): normalize to [-1, 1] using CUT training formula
-		// formula: (channel_byte / 127.5) - 1.0
-		//   0   → -1.000
-		//   128 ≈  0.003  (≈ 0)
-		//   255 →  1.000
 		const dst = new Float32Array(targetBuffer)
 		let src = 0,
 			d = 0
 		for (let i = 0; i < totalPixels; i++) {
-			dst[d] = rgbaSource[src] / 127.5 - 1.0 // R: [0,255] → [-1,1]
-			dst[d + 1] = rgbaSource[src + 1] / 127.5 - 1.0 // G
-			dst[d + 2] = rgbaSource[src + 2] / 127.5 - 1.0 // B
-			// Alpha at rgbaSource[src + 3] is discarded — models are RGB-only
+			dst[d] =
+				rgbaSource[src] / MODEL_PREPROCESS.SCALE -
+				MODEL_PREPROCESS.SHIFT
+			dst[d + 1] =
+				rgbaSource[src + 1] / MODEL_PREPROCESS.SCALE -
+				MODEL_PREPROCESS.SHIFT
+			dst[d + 2] =
+				rgbaSource[src + 2] / MODEL_PREPROCESS.SCALE -
+				MODEL_PREPROCESS.SHIFT
 			src += 4
 			d += 3
 		}
@@ -338,7 +505,7 @@ export function prepareInputTensor(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 6 — LIVE VIEWFINDER RGBA CONVERSION  (WORKLET-SAFE)
+// SECTION 8 — LIVE VIEWFINDER RGBA CONVERSION  (WORKLET-SAFE)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -346,25 +513,14 @@ export function prepareInputTensor(
  * Writes into the caller-supplied `outputBuffer` — zero allocation.
  *
  * ⚡ WORKLET-SAFE constraints:
- *   ✓ 'worklet' directive.
- *   ✓ Zero closures over module-scope variables — all via parameters.
- *   ✓ No Math.min / Math.max — Hermes worklet constraint. Ternary clamps used.
- *   ✓ No intermediate buffers allocated.
- *   ✓ No lookup table access — module-scope objects unavailable in worklets.
+ *   ✓ 'worklet' directive
+ *   ✓ Zero closures over module-scope variables
+ *   ✓ No Math.min / Math.max — Hermes worklet constraint; ternary clamps used
+ *   ✓ No intermediate buffers allocated
+ *   ✓ No lookup table access — module-scope objects unavailable in worklets
  *
- * isUint8=false path (FIX D — replaces inline fp16 arithmetic):
- *   Reads Float32Array, values in [-1, 1] (raw Tanh model output).
- *   Denormalises: byte = ((v + 1.0) * 127.5) clamped to [0, 255].
- *   This is the inverse of prepareInputTensor's normalisation.
- *
- * isUint8=true path:
- *   Reads Uint8Array (RGB packed), copies directly to RGBA with alpha=255.
- *   Used for INT8 quantized models or pre-decoded uint8 outputs.
- *
- * @param inputBuffer  - Model output: Float32Array (isUint8=false) or Uint8Array (isUint8=true)
- * @param outputBuffer - RGBA uint8 destination (resolution × resolution × 4 bytes)
- * @param resolution   - 512 for main/teacher, 256 for preview/student
- * @param isUint8      - false for float32 models (default), true for uint8/INT8 models
+ * isUint8=false path: float32 [-1, 1] → byte = ((v + 1.0) * MODEL_PREPROCESS.SCALE)
+ * isUint8=true path:  RGB packed uint8 → RGBA uint8 with alpha=255
  */
 export function toRGBAWorklet(
 	inputBuffer: ArrayBuffer,
@@ -377,7 +533,6 @@ export function toRGBAWorklet(
 	const totalPixels = resolution * resolution
 
 	if (isUint8) {
-		// INT8 model path: packed RGB uint8 → RGBA uint8
 		const src8 = new Uint8Array(inputBuffer)
 		let s = 0,
 			d = 0
@@ -390,32 +545,21 @@ export function toRGBAWorklet(
 			d += 4
 		}
 	} else {
-		// Float32 model path (FIX D): float32 [-1, 1] → uint8 [0, 255]
-		// Denormalise: byte = ((v + 1.0) * 127.5)  clamped to [0, 255]
-		// No Math.min/max — Hermes worklet requirement. Ternary clamps used.
-		//
-		// Derivation:
-		//   model out v ∈ [-1, 1] (Tanh)
-		//   (v + 1.0) ∈ [0, 2]
-		//   * 127.5   ∈ [0, 255]
 		const src32 = new Float32Array(inputBuffer)
 		let s = 0,
 			d = 0
 
 		for (let i = 0; i < totalPixels; i++) {
-			// Red channel
-			let rv: number = (src32[s] + 1.0) * 127.5
+			let rv: number = (src32[s] + 1.0) * MODEL_PREPROCESS.SCALE
 			outputBuffer[d] = rv < 0 ? 0 : rv > 255 ? 255 : rv | 0
 
-			// Green channel
-			let gv: number = (src32[s + 1] + 1.0) * 127.5
+			let gv: number = (src32[s + 1] + 1.0) * MODEL_PREPROCESS.SCALE
 			outputBuffer[d + 1] = gv < 0 ? 0 : gv > 255 ? 255 : gv | 0
 
-			// Blue channel
-			let bv: number = (src32[s + 2] + 1.0) * 127.5
+			let bv: number = (src32[s + 2] + 1.0) * MODEL_PREPROCESS.SCALE
 			outputBuffer[d + 2] = bv < 0 ? 0 : bv > 255 ? 255 : bv | 0
 
-			outputBuffer[d + 3] = 255 // Alpha: always fully opaque
+			outputBuffer[d + 3] = 255
 			s += 3
 			d += 4
 		}
@@ -423,56 +567,49 @@ export function toRGBAWorklet(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 7 — MODEL OUTPUT DECODE: float32 [-1,1] → float32 [0,1]
+// SECTION 9 — MODEL OUTPUT DECODE: float32 [-1,1] → float32 [0,1]
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Decodes raw float32 model output into the shared decode workspace [0, 1].
+ * Decodes raw float32 model output into a lazily-allocated decode workspace
+ * in the range [0, 1].
  *
- * DENORMALISATION (FIX C — replaces fp16 lookup table decode):
- *   Raw model output: float32 in [-1, 1] (Tanh activation)
- *   Denormalised:     float32 in [0, 1]  via (v + 1.0) * 0.5
+ * FIX R3: Signature changed from `slot: 'preview' | 'main'` to
+ * `resolution: number`. The caller already has the runtime model config and
+ * therefore knows the resolution. Accepting it directly eliminates the
+ * need to look up the resolution from module-scope constants.
  *
- * Returns a subarray view of _sharedF32Decode — valid until the next call.
- * Callers must not hold the reference across await boundaries.
+ * The returned Float32Array is a view into a lazily-allocated registry buffer.
+ * It is valid until the next call to decodeModelOutput with the same resolution
+ * (which would overwrite the same backing buffer). Callers must not hold the
+ * reference across await boundaries.
  *
- * Used by: live preview compositing path (camera → student model → SkiaRenderer)
- * NOT used by: stitchTiles (which denormalises inline during accumulation)
- *
- * @param rawBuf - ArrayBuffer from InferenceEngine.runInferenceSync()
- *                 Contains float32 values in [-1, 1], NHWC layout.
- *                 ByteLength must equal resolution² × 3 × 4 bytes.
- * @param slot   - 'preview' (256×256) or 'main' (512×512)
+ * @param rawBuf    - ArrayBuffer from InferenceEngine.runInferenceSync().
+ *                    ByteLength must equal resolution² × 3 × 4 bytes.
+ * @param resolution - Runtime tile resolution (e.g. 256 or 512).
  */
 export function decodeModelOutput(
 	rawBuf: ArrayBuffer,
-	slot: 'preview' | 'main'
+	resolution: number
 ): Float32Array {
-	const expectedElements =
-		slot === 'preview'
-			? PREVIEW_RES * PREVIEW_RES * CHANNELS // 196,608
-			: INFERENCE_RES * INFERENCE_RES * CHANNELS // 786,432
-
-	const expectedBytes = expectedElements * F32_BYTES // × 4
+	const expectedElements = resolution * resolution * SYSTEM_BOUNDS.CHANNELS
+	const expectedBytes = expectedElements * SYSTEM_BOUNDS.F32_BYTES
 
 	if (rawBuf.byteLength !== expectedBytes) {
 		throw new Error(
 			`[tensorUtils] decodeModelOutput: buffer size mismatch. ` +
-				`Expected ${expectedBytes}B for slot="${slot}" (float32 model), ` +
+				`Expected ${expectedBytes}B for resolution=${resolution} (float32 model), ` +
 				`got ${rawBuf.byteLength}B. ` +
 				`If the model is INT8 quantized, use a separate decode path.`
 		)
 	}
 
-	// Denormalize: float32 [-1, 1] → float32 [0, 1]
-	// Inversion of CUT training normalization: (v + 1.0) * 0.5
-	// Tanh output range is strictly (-1, 1); clamp for numerical safety.
+	// Lazy decode workspace — allocated once per resolution, re-used on repeat calls.
+	const out = _getOrAllocF32(`decode:${resolution}`, expectedElements)
 	const f32Input = new Float32Array(rawBuf)
-	const out = _sharedF32Decode.subarray(0, expectedElements)
 
 	for (let i = 0; i < expectedElements; i++) {
 		const v = f32Input[i]
-		// Clamp to [-1, 1] then shift to [0, 1]
 		out[i] = v < -1.0 ? 0.0 : v > 1.0 ? 1.0 : (v + 1.0) * 0.5
 	}
 
@@ -480,8 +617,23 @@ export function decodeModelOutput(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8 — TILE COORDINATE GRID
+// SECTION 10 — TILE COORDINATE GRID
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * BUG 5 FIX: Minimum overlap clamp for tileImage, aligned with
+ * TiledInferenceRunner.MIN_TILE_OVERLAP (0.5).
+ *
+ * The previous tileImage code clamped at 0.20, while TiledInferenceRunner
+ * clamped at 0.5. A caller supplying a value in [0.20, 0.50) would get
+ * inconsistent grids depending on which code path executed — tileImage
+ * produced a coarser grid than TiledInferenceRunner, making external callers
+ * unreliable when tileOverlap was set in that range.
+ *
+ * Both guards now agree at 0.5. Values below 0.5 disable meaningful Gaussian
+ * blending regardless of sigma, so the stricter threshold is also correct.
+ */
+const MIN_TILEIMAGE_OVERLAP = 0.5
 
 export interface TileCoord {
 	col: number
@@ -509,38 +661,59 @@ export interface TileGrid {
  * Computes the full overlap tile grid for an arbitrary source image.
  *
  * tileOverlap handling (backward-compatible):
- *   > 1  → treated as pixel count (legacy config.json: e.g. 64 px)
- *   ≤ 1  → treated as fraction (preferred: e.g. 0.25 = 25%)
+ *   > 1  → treated as pixel count (e.g. 64 px)
+ *   ≤ 1  → treated as fraction (e.g. 0.25 = 25%)
  *
- * DEFAULT_MODEL_CONFIG.tileOverlap = 0.25 (25%) — updated from legacy 64 px.
- * At 25% overlap with 512px tiles: overlapPx = 128, step = 384.
+ * BUG 4 FIX: The previous implementation always derived `tileSize` from
+ * `config.mainModel`. Any caller that needed a preview-resolution grid had
+ * to rely on an implicit contract that config.mainModel was already set to
+ * the preview resolution — which is never true in normal usage.
+ *
+ * Fix: accept an explicit `tileSize` parameter. When omitted the function
+ * falls back to `config.mainModel` for full backward compatibility. Callers
+ * that need the preview grid (student model, 256-resolution pipeline) must
+ * pass `config.previewModel` explicitly:
+ *   tileImage(w, h, config, config.previewModel)
  */
 export function tileImage(
 	imageW: number,
 	imageH: number,
-	config: ModelConfig
+	config: ModelConfig,
+	tileSize?: number // explicit override; omit to use config.mainModel
 ): TileGrid {
-	const tileSize = config.inferenceResolution
+	const resolvedTileSize = tileSize ?? config.mainModel
+
+	const clampedOverlap = Math.max(config.tileOverlap, MIN_TILEIMAGE_OVERLAP)
+	if (config.tileOverlap < MIN_TILEIMAGE_OVERLAP) {
+		tracker.warn(
+			`[tensorUtils] tileImage: tileOverlap=${config.tileOverlap} is below ` +
+				`minimum ${MIN_TILEIMAGE_OVERLAP}. Clamping to ${MIN_TILEIMAGE_OVERLAP} to prevent seam artifacts.`
+		)
+	}
 
 	const overlapPx =
-		config.tileOverlap > 1
-			? Math.round(config.tileOverlap)
-			: Math.round(config.tileOverlap * tileSize)
+		clampedOverlap > 1
+			? Math.round(clampedOverlap)
+			: Math.round(clampedOverlap * resolvedTileSize)
 
-	const step = tileSize - overlapPx
+	const step = resolvedTileSize - overlapPx
 
 	if (step <= 0) {
 		throw new Error(
 			`[tensorUtils] tileImage: step=${step} must be > 0. ` +
-				`tileSize=${tileSize}, overlapPx=${overlapPx}. ` +
+				`tileSize=${resolvedTileSize}, overlapPx=${overlapPx}. ` +
 				`Check ModelConfig.tileOverlap (should be 0.0–0.9 fraction or < tileSize px).`
 		)
 	}
 
 	const numCols =
-		imageW <= tileSize ? 1 : Math.ceil((imageW - tileSize) / step) + 1
+		imageW <= resolvedTileSize
+			? 1
+			: Math.ceil((imageW - resolvedTileSize) / step) + 1
 	const numRows =
-		imageH <= tileSize ? 1 : Math.ceil((imageH - tileSize) / step) + 1
+		imageH <= resolvedTileSize
+			? 1
+			: Math.ceil((imageH - resolvedTileSize) / step) + 1
 	const total = numCols * numRows
 
 	const coords: TileCoord[] = new Array(total)
@@ -555,8 +728,8 @@ export function tileImage(
 				index: row * numCols + col,
 				x,
 				y,
-				w: Math.min(tileSize, imageW - x),
-				h: Math.min(tileSize, imageH - y),
+				w: Math.min(resolvedTileSize, imageW - x),
+				h: Math.min(resolvedTileSize, imageH - y),
 			}
 		}
 	}
@@ -564,7 +737,7 @@ export function tileImage(
 	return {
 		imageW,
 		imageH,
-		tileSize,
+		tileSize: resolvedTileSize,
 		step,
 		overlapPx,
 		numCols,
@@ -575,44 +748,7 @@ export function tileImage(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 9 — GAUSSIAN WEIGHT MASK (pre-computed at module init)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// 2D Gaussian window σ = 512 / 5 = 102.4
-// Properties:
-//   Center weight = 1.0 (after normalisation to peak)
-//   Edge weight   ≈ exp(−(256)² / (2 × 102.4²)) = exp(−3.125) ≈ 0.044
-//   Floor         = 1e-6 (prevents division by zero in denominator)
-//
-// See artlens_infer_v5.py Section 5 (_make_gaussian_window) for derivation.
-
-const _GAUSSIAN_SIGMA_DIV = 5.0
-
-const _gaussianWindow512: Float32Array = (() => {
-	const size = 512
-	const sigma = size / _GAUSSIAN_SIGMA_DIV
-	const twoS2 = 2 * sigma * sigma
-	const half = (size - 1) / 2
-	const win = new Float32Array(size * size)
-
-	for (let y = 0; y < size; y++) {
-		const dy = y - half
-		for (let x = 0; x < size; x++) {
-			const dx = x - half
-			win[y * size + x] = Math.exp(-(dx * dx + dy * dy) / twoS2)
-		}
-	}
-
-	let peak = 0
-	for (let i = 0; i < win.length; i++) if (win[i] > peak) peak = win[i]
-	const invPeak = 1.0 / peak
-	for (let i = 0; i < win.length; i++) win[i] = win[i] * invPeak + 1e-6
-
-	return win
-})()
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SECTION 10 — PROCESSED TILE DESCRIPTOR
+// SECTION 11 — PROCESSED TILE DESCRIPTOR
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface ProcessedTile {
@@ -620,42 +756,33 @@ export interface ProcessedTile {
 	/**
 	 * Raw float32 model output for this tile.
 	 * Layout: NHWC with batch=1 removed → [tileSize, tileSize, 3]
-	 * Values: [-1, 1] (Tanh activation range, unnormalised)
-	 * ByteLength: tileSize × tileSize × 3 × 4 = 3,145,728 B for 512px tiles.
-	 *
-	 * FIX E: Renamed from rawFp16 — both models are float32, not float16.
+	 * Values: [-1, 1] (Tanh activation range, unnormalized)
+	 * ByteLength: tileSize² × 3 × 4 bytes.
 	 */
 	rawF32: ArrayBuffer
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 11 — GAUSSIAN OVERLAP-ADD TILE STITCHING
+// SECTION 12 — GAUSSIAN OVERLAP-ADD TILE STITCHING
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Reconstructs a full-resolution Float32 [0,1] image from Gaussian-blended tiles.
  *
+ * FIX R2: Now calls getGaussianWindow(tileSize) instead of using the fixed
+ * module-scope _gaussianWindow512. This correctly handles both the main
+ * (512-pixel) and preview (256-pixel) pipelines, and any future resolution.
+ *
+ * The window is indexed as [ty * tileSize + tx], which is correct because
+ * getGaussianWindow returns a tileSize×tileSize matrix with row stride tileSize.
+ *
  * ALGORITHM (two-pass Gaussian weighted overlap-add):
- *   Pass 1 — Accumulation:
- *     For each tile t at canvas position (cx, cy):
- *       For each pixel (tx, ty) within the tile:
- *         raw_v = src32[(ty × 512 + tx) × 3 + ch]    ← float32 in [-1, 1]
- *         f_v   = (raw_v + 1.0) × 0.5                 ← denormalize to [0, 1]
- *         weight = _gaussianWindow512[ty × 512 + tx]
- *         _stitchNumerator[(cy + ty) × imageW × 3 + (cx + tx) × 3 + ch]   += f_v × weight
- *         _stitchDenominator[(cy + ty) × imageW + (cx + tx)]               += weight
- *
- *   Pass 2 — Normalise:
- *     output[p × 3 + ch] = numerator[p × 3 + ch] / denominator[p]
- *     Denominator always > 1e-6 (Gaussian floor) — no div-by-zero possible.
- *
- * FIX C: Input is now Float32Array in [-1,1] (was Uint16Array fp16 with lookup table).
- *        Denormalization `(v + 1.0) * 0.5` replaces `_fp16LookupTable[src16[i]]`.
- *        Output remains Float32Array in [0,1] — downstream code unchanged.
+ *   Pass 1 — Accumulation using pre-allocated _stitchNumerator/_stitchDenominator
+ *   Pass 2 — Normalisation → output Float32Array in [0, 1]
  *
  * @param grid  - TileGrid from tileImage()
  * @param tiles - All ProcessedTile objects covering the full grid (any order)
- * @returns      Float32Array [imageH × imageW × 3] in [0, 1]. One fresh allocation per call.
+ * @returns      Float32Array [imageH × imageW × 3] in [0, 1]. One fresh allocation.
  */
 export function stitchTiles(
 	grid: TileGrid,
@@ -672,16 +799,22 @@ export function stitchTiles(
 		)
 	}
 
+	// FIX R2: Use resolution-appropriate Gaussian window from the lazy cache.
+	const gaussianWindow = getGaussianWindow(tileSize)
+
+	// Obtain lazily-allocated accumulators (Bug 6 fix: no longer module-load static).
+	const stitchNum = _getStitchNumerator()
+	const stitchDen = _getStitchDenominator()
+
 	// Zero-fill pre-allocated accumulators (no per-stitch allocation)
-	_stitchNumerator.fill(0, 0, totalPixels * CHANNELS)
-	_stitchDenominator.fill(0, 0, totalPixels)
+	stitchNum.fill(0, 0, totalPixels * SYSTEM_BOUNDS.CHANNELS)
+	stitchDen.fill(0, 0, totalPixels)
 
 	// ── Pass 1: Gaussian-weighted accumulation ────────────────────────────────
 	for (let t = 0; t < tiles.length; t++) {
-		const { coord, rawF32 } = tiles[t] // FIX E: was rawFp16
+		const { coord, rawF32 } = tiles[t]
 		const { x: cx, y: cy, w: tileW, h: tileH } = coord
 
-		// FIX C: Float32Array view — replaces Uint16Array + fp16 lookup
 		const src32 = new Float32Array(rawF32)
 
 		for (let ty = 0; ty < tileH; ty++) {
@@ -695,11 +828,10 @@ export function stitchTiles(
 				const canvasX = cx + tx
 				if (canvasX >= imageW) continue
 
-				const weight = _gaussianWindow512[tileRowBase + tx]
-				const srcBase = (tileRowBase + tx) * CHANNELS // index into src32
+				// FIX R2: index into the correctly-sized window for this tileSize
+				const weight = gaussianWindow[tileRowBase + tx]
+				const srcBase = (tileRowBase + tx) * SYSTEM_BOUNDS.CHANNELS
 
-				// FIX C: Denormalise from [-1,1] to [0,1]: (v + 1.0) * 0.5
-				// Clamp for numerical safety (Tanh is strictly < 1 but FP precision)
 				const rawR = src32[srcBase]
 				const rawG = src32[srcBase + 1]
 				const rawB = src32[srcBase + 2]
@@ -711,31 +843,32 @@ export function stitchTiles(
 				const fB =
 					rawB < -1.0 ? 0.0 : rawB > 1.0 ? 1.0 : (rawB + 1.0) * 0.5
 
-				const numBase = (canvasRowBase + canvasX) * CHANNELS
+				const numBase =
+					(canvasRowBase + canvasX) * SYSTEM_BOUNDS.CHANNELS
 				const denIdx = canvasRowBase + canvasX
 
-				_stitchNumerator[numBase] += fR * weight
-				_stitchNumerator[numBase + 1] += fG * weight
-				_stitchNumerator[numBase + 2] += fB * weight
-				_stitchDenominator[denIdx] += weight
+				stitchNum[numBase] += fR * weight
+				stitchNum[numBase + 1] += fG * weight
+				stitchNum[numBase + 2] += fB * weight
+				stitchDen[denIdx] += weight
 			}
 		}
 	}
 
 	// ── Pass 2: Normalise → output [0, 1] ────────────────────────────────────
-	const output = new Float32Array(totalPixels * CHANNELS)
+	const output = new Float32Array(totalPixels * SYSTEM_BOUNDS.CHANNELS)
 
 	for (let p = 0; p < totalPixels; p++) {
-		const invDen = 1.0 / _stitchDenominator[p] // always > 1e-6 (Gaussian floor)
-		const srcBase = p * CHANNELS
+		const invDen = 1.0 / stitchDen[p] // always > GAUSSIAN_FLOOR_EPSILON
+		const srcBase = p * SYSTEM_BOUNDS.CHANNELS
 
-		let v = _stitchNumerator[srcBase] * invDen
+		let v = stitchNum[srcBase] * invDen
 		output[srcBase] = v < 0 ? 0 : v > 1 ? 1 : v
 
-		v = _stitchNumerator[srcBase + 1] * invDen
+		v = stitchNum[srcBase + 1] * invDen
 		output[srcBase + 1] = v < 0 ? 0 : v > 1 ? 1 : v
 
-		v = _stitchNumerator[srcBase + 2] * invDen
+		v = stitchNum[srcBase + 2] * invDen
 		output[srcBase + 2] = v < 0 ? 0 : v > 1 ? 1 : v
 	}
 
@@ -743,16 +876,21 @@ export function stitchTiles(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 12 — ALPHA / LUMINANCE BLENDING
+// SECTION 13 — ALPHA / LUMINANCE BLENDING
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Blends original and stylized Float32 [0,1] tensors.
  *
+ * FIX R5: The shared blend fallback buffer is no longer a fixed-size module-scope
+ * singleton. _getOrAllocF32 provides a lazily-allocated, growable buffer keyed
+ * to the required element count. This removes the old upper bound that threw
+ * when the input tensor exceeded INFERENCE_RES² × 3 elements.
+ *
  * Both tensors must be in [0,1] (post-denormalization). Supplying raw model
  * output in [-1,1] will produce incorrect blend results.
  *
- * Pass `out` for images > 512×512 (avoids sharedBlendBuffer overflow).
+ * Pass `out` to write into a caller-managed buffer (e.g. for large stitched images).
  */
 export function alphaBlend(
 	original: Float32Array,
@@ -767,7 +905,7 @@ export function alphaBlend(
 		)
 	}
 
-	let outBuf: Float32Array
+	let target: Float32Array
 	if (out !== undefined) {
 		if (out.length < original.length) {
 			throw new Error(
@@ -775,16 +913,10 @@ export function alphaBlend(
 					`is smaller than input tensors (${original.length}).`
 			)
 		}
-		outBuf = out
+		target = out
 	} else {
-		if (original.length > sharedBlendBuffer.length) {
-			throw new Error(
-				`[tensorUtils] alphaBlend: tensors (${original.length} elements) ` +
-					`exceed sharedBlendBuffer (${sharedBlendBuffer.length} elements). ` +
-					`Supply a pre-allocated 'out' Float32Array for images > 512×512.`
-			)
-		}
-		outBuf = sharedBlendBuffer
+		// FIX R5: lazy, growable shared blend buffer — no static size limit.
+		target = _getOrAllocF32('blend:shared', original.length)
 	}
 
 	const invAlpha = 1.0 - luminanceBlend
@@ -792,52 +924,78 @@ export function alphaBlend(
 
 	for (let i = 0; i < len; i++) {
 		const v = original[i] * invAlpha + stylized[i] * luminanceBlend
-		outBuf[i] = v < 0 ? 0 : v > 1 ? 1 : v
+		target[i] = v < 0 ? 0 : v > 1 ? 1 : v
 	}
 
-	return out !== undefined
-		? outBuf.subarray(0, len)
-		: sharedBlendBuffer.subarray(0, len)
+	return target.subarray(0, len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 13 — FLOAT32 TENSOR → RGBA BYTE BUFFER
+// SECTION 14 — FLOAT32 TENSOR → RGBA BYTE BUFFER
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Converts a Float32Array in [0,1] to a Uint8Array of RGBA pixels.
- * Input must be post-denormalized (call decodeModelOutput or stitchTiles first).
+ * Converts a Float32Array in [0,1] to a Uint8Array of RGBA pixels for
+ * the preview (student model) display path.
+ *
+ * FIX R4: Accepts explicit `resolution` and writes into a lazily-allocated
+ * registry buffer instead of a fixed-size module-scope singleton.
+ *
+ * @param f32        - Float32 tensor in [0,1], length = resolution² × CHANNELS
+ * @param resolution - Runtime tile resolution (must match the model that produced f32)
  */
-export function f32ToPreviewRgba(f32: Float32Array): Uint8Array {
-	const totalPixels = (f32.length / CHANNELS) | 0
+export function f32ToPreviewRgba(
+	f32: Float32Array,
+	resolution: number
+): Uint8Array {
+	const totalPixels = (f32.length / SYSTEM_BOUNDS.CHANNELS) | 0
+	const rgbaBuf = _getOrAllocU8(
+		`rgba:preview:${resolution}`,
+		totalPixels * SYSTEM_BOUNDS.RGBA_CHANNELS
+	)
+
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS,
-			d = i * RGBA_CHANNELS
-		sharedPreviewRgbaBuffer[d] = (f32[s] * 255) | 0
-		sharedPreviewRgbaBuffer[d + 1] = (f32[s + 1] * 255) | 0
-		sharedPreviewRgbaBuffer[d + 2] = (f32[s + 2] * 255) | 0
-		sharedPreviewRgbaBuffer[d + 3] = 255
+		const s = i * SYSTEM_BOUNDS.CHANNELS
+		const d = i * SYSTEM_BOUNDS.RGBA_CHANNELS
+		rgbaBuf[d] = (f32[s] * 255) | 0
+		rgbaBuf[d + 1] = (f32[s + 1] * 255) | 0
+		rgbaBuf[d + 2] = (f32[s + 2] * 255) | 0
+		rgbaBuf[d + 3] = 255
 	}
-	return sharedPreviewRgbaBuffer
+
+	return rgbaBuf
 }
 
-export function f32ToMainRgba(f32: Float32Array): Uint8Array {
-	const totalPixels = (f32.length / CHANNELS) | 0
-	if (totalPixels * RGBA_CHANNELS > sharedMainRgbaBuffer.length) {
-		throw new Error(
-			`[tensorUtils] f32ToMainRgba: ${totalPixels}px exceeds sharedMainRgbaBuffer. ` +
-				`Use f32StitchedToRgba() for stitched large images.`
-		)
-	}
+/**
+ * Converts a Float32Array in [0,1] to a Uint8Array of RGBA pixels for
+ * the main (teacher model) display path.
+ *
+ * FIX R4: Accepts explicit `resolution` and writes into a lazily-allocated
+ * registry buffer instead of a fixed-size module-scope singleton.
+ *
+ * @param f32        - Float32 tensor in [0,1], length = resolution² × CHANNELS
+ * @param resolution - Runtime tile resolution (must match the model that produced f32)
+ */
+export function f32ToMainRgba(
+	f32: Float32Array,
+	resolution: number
+): Uint8Array {
+	const totalPixels = (f32.length / SYSTEM_BOUNDS.CHANNELS) | 0
+	const rgbaBuf = _getOrAllocU8(
+		`rgba:main:${resolution}`,
+		totalPixels * SYSTEM_BOUNDS.RGBA_CHANNELS
+	)
+
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS,
-			d = i * RGBA_CHANNELS
-		sharedMainRgbaBuffer[d] = (f32[s] * 255) | 0
-		sharedMainRgbaBuffer[d + 1] = (f32[s + 1] * 255) | 0
-		sharedMainRgbaBuffer[d + 2] = (f32[s + 2] * 255) | 0
-		sharedMainRgbaBuffer[d + 3] = 255
+		const s = i * SYSTEM_BOUNDS.CHANNELS
+		const d = i * SYSTEM_BOUNDS.RGBA_CHANNELS
+		rgbaBuf[d] = (f32[s] * 255) | 0
+		rgbaBuf[d + 1] = (f32[s + 1] * 255) | 0
+		rgbaBuf[d + 2] = (f32[s + 2] * 255) | 0
+		rgbaBuf[d + 3] = 255
 	}
-	return sharedMainRgbaBuffer
+
+	return rgbaBuf
 }
 
 /**
@@ -852,10 +1010,10 @@ export function f32StitchedToRgba(
 	imageH: number
 ): Uint8Array {
 	const totalPixels = imageW * imageH
-	const out = new Uint8Array(totalPixels * RGBA_CHANNELS)
+	const out = new Uint8Array(totalPixels * SYSTEM_BOUNDS.RGBA_CHANNELS)
 	for (let i = 0; i < totalPixels; i++) {
-		const s = i * CHANNELS,
-			d = i * RGBA_CHANNELS
+		const s = i * SYSTEM_BOUNDS.CHANNELS
+		const d = i * SYSTEM_BOUNDS.RGBA_CHANNELS
 		out[d] = (f32[s] * 255) | 0
 		out[d + 1] = (f32[s + 1] * 255) | 0
 		out[d + 2] = (f32[s + 2] * 255) | 0
@@ -865,44 +1023,55 @@ export function f32StitchedToRgba(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 14 — BUFFER VALIDATION HELPERS
+// SECTION 15 — BUFFER VALIDATION HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Validates that a model output buffer has the expected byte size for float32 models.
- * Expected: resolution² × 3 channels × 4 bytes (F32_BYTES).
+ * Expected: resolution² × CHANNELS × F32_BYTES.
+ *
+ * Accepts the resolution as a runtime parameter — never resolved from static defaults.
  */
 export function validateOutputBuffer(
 	buf: ArrayBuffer,
-	slot: 'preview' | 'main'
+	resolution: number
 ): void {
-	const res = slot === 'preview' ? PREVIEW_RES : INFERENCE_RES
-	const expected = res * res * CHANNELS * F32_BYTES // FIX A: was FP16_BYTES
+	const expected =
+		resolution *
+		resolution *
+		SYSTEM_BOUNDS.CHANNELS *
+		SYSTEM_BOUNDS.F32_BYTES
+
 	if (buf.byteLength !== expected) {
 		throw new Error(
-			`[tensorUtils] validateOutputBuffer: slot="${slot}" ` +
-				`expected ${expected}B (float32), got ${buf.byteLength}B.`
+			`[tensorUtils] validateOutputBuffer: ` +
+				`expected ${expected}B (float32, resolution=${resolution}), ` +
+				`got ${buf.byteLength}B.`
 		)
 	}
 }
 
 /**
  * Validates that a model input buffer has the expected byte size.
- * Float32 model (isU8=false): resolution² × 3 × 4 bytes.
- * INT8 model (isU8=true):     resolution² × 3 × 1 bytes.
+ * Float32 model (isU8=false): resolution² × CHANNELS × F32_BYTES.
+ * INT8 model (isU8=true):     resolution² × CHANNELS × 1 byte.
+ *
+ * Accepts the resolution as a runtime parameter — never resolved from static defaults.
  */
 export function validateInputBuffer(
 	buf: ArrayBuffer,
-	slot: 'preview' | 'main',
+	resolution: number,
 	isU8: boolean
 ): void {
-	const res = slot === 'preview' ? PREVIEW_RES : INFERENCE_RES
-	const bytesPerEl = isU8 ? 1 : F32_BYTES // FIX A: was FP16_BYTES for float path
-	const expected = res * res * CHANNELS * bytesPerEl
+	const bytesPerEl = isU8 ? 1 : SYSTEM_BOUNDS.F32_BYTES
+	const expected =
+		resolution * resolution * SYSTEM_BOUNDS.CHANNELS * bytesPerEl
+
 	if (buf.byteLength !== expected) {
 		throw new Error(
-			`[tensorUtils] validateInputBuffer: slot="${slot}" isU8=${isU8} ` +
-				`expected ${expected}B, got ${buf.byteLength}B.`
+			`[tensorUtils] validateInputBuffer: ` +
+				`expected ${expected}B (resolution=${resolution}, isU8=${isU8}), ` +
+				`got ${buf.byteLength}B.`
 		)
 	}
 }

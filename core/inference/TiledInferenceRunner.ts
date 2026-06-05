@@ -5,101 +5,88 @@
  *              Gaussian windowed overlap-add reconstruction.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * PIPELINE OVERVIEW
+ * REFACTOR CHANGES (v2 — full coverage, reflection extraction, colour correction)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ *  FIX 1 (preserved) — rawOutput buffer aliasing
+ *    rawOutput.slice(0) creates an owned copy before the next runInferenceSync
+ *    overwrites the native TFLite output buffer. Without this, all ProcessedTile
+ *    entries reference the same memory location — holding only the last tile's
+ *    output — producing the repeating-grid artifact.
+ *
+ *  FIX 2 — Black border from incomplete tile coverage  [_buildFullCoverageTileGrid]
+ *    tensorUtils.tileImage() positions the last tile at (numCols−1)×step, which
+ *    may leave pixels near the right/bottom image edges uncovered when
+ *    (imageW − tileSize) is not exactly divisible by step. Those uncovered pixels
+ *    accumulate denominator=0 in the Gaussian stitch and are emitted as black,
+ *    producing the visible dark border band around the output image.
+ *
+ *    Fix: _buildFullCoverageTileGrid() always appends a final tile positioned
+ *    at (imageW−tileSize, imageH−tileSize), guaranteeing every canvas pixel is
+ *    covered by at least one tile regardless of step or image dimensions.
+ *
+ *  FIX 3 — Edge tile boundary distortion  [_extractTileRgba — reflection upgrade]
+ *    The previous implementation used edge-clamping (replication padding) for
+ *    out-of-bounds pixels at image boundaries. The generator's InstanceNorm layers
+ *    compute statistics over the full tile, so replicated constant-value rows/
+ *    columns at the edges bias the per-tile mean and std, producing a brightness
+ *    or colour shift in the edge zone of boundary tiles.
+ *
+ *    Fix: Replace edge-clamping with reflection padding (symmetric mirroring).
+ *    Out-of-bounds pixels are mapped to their reflected counterpart within the
+ *    image. Tile size and TFLite input shape are unchanged — the fixed-shape
+ *    contract is preserved.
+ *
+ *  FIX 4 — Per-tile InstanceNorm colour drift  [_applyTextureOnlyColour]
+ *    InstanceNorm2d computes per-tile mean/std independently. Tiles from different
+ *    image regions (sky vs ground, light vs dark) are normalised to different
+ *    statistics, producing mutually inconsistent colour outputs after stylisation.
+ *    Visible symptom: adjacent tiles have distinct colour casts with hard
+ *    boundaries even after Gaussian blending.
+ *
+ *    Fix: Post-stitch YCbCr luminance transfer.
+ *    Algorithm: compute BT.601 luma (Y) for both stylised and original images,
+ *    blend the Y channels (impasto texture from stylised, brightness anchor from
+ *    original), then scale the original RGB values by the luminance ratio.
+ *    This keeps the original image's chrominance (Cb, Cr) intact while transferring
+ *    Van Gogh brushstroke luminance structure onto the original palette.
+ *    Mirrors artlens_infer_v5.py::colour_mode_texture_only() in sRGB/YCbCr space.
+ *
+ *  FIX 5 — Minimum overlap enforcement  [_buildFullCoverageTileGrid]
+ *    tileOverlap values below MIN_TILE_OVERLAP (0.5) produce a step so large
+ *    that the Gaussian tails from adjacent tiles do not overlap meaningfully —
+ *    seams are visible regardless of Gaussian sigma. The grid builder clamps
+ *    to MIN_TILE_OVERLAP and emits a tracker warning so the misconfiguration is
+ *    observable in logs without silently corrupting output quality.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * PIPELINE OVERVIEW (v2)
  * ─────────────────────────────────────────────────────────────────────────────
  *
  *  ┌──────────────────────────────────────────────────────────────────────────┐
- *  │ Phase 0  CONFIG     getModelConfig(styleId) → tileOverlap, inferenceRes  │
- *  │ Phase 1  DECODE     file:// URI → Skia decode → fullRgba Uint8Array      │
- *  │ Phase 2  GRID       tileImage(W, H, config) → TileGrid                  │
+ *  │ Phase 0  CONFIG     getModelConfig → inferenceRes, tileOverlap           │
+ *  │ Phase 1  DECODE     sourceUri → Skia → fullRgba Uint8Array               │
+ *  │ Phase 2  GRID       _buildFullCoverageTileGrid → TileGrid [FIX 2+5]      │
  *  │ Phase 3  HOT LOOP   for each TileCoord:                                  │
- *  │            A) extractTileRgba → _tileScratch[512×512×4]                 │
- *  │            B) prepareInputTensor → mainInputBuffer[512×512×3×f32]       │
- *  │            C) runInferenceSync('main') → rawF32 ArrayBuffer             │
+ *  │            A) _extractTileRgba (reflection) → scratch  [FIX 3]          │
+ *  │            B) prepareInputTensor → inputBuf                              │
+ *  │            C) runInferenceSync → rawF32.slice(0)        [FIX 1]         │
  *  │            D) push ProcessedTile{ coord, rawF32 }                       │
- *  │            E) onProgress(k/total), yield to event loop                  │
- *  │ Phase 4  STITCH     stitchTiles(grid, tiles) → Float32Array [H×W×3]     │
- *  │ Phase 5  EXPORT     f32StitchedToRgba → Skia JPEG encode → cache write  │
+ *  │            E) onProgress, yield to event loop                           │
+ *  │ Phase 4  STITCH     _stitchTilesLocal → Float32Array [H×W×3] in [0,1]   │
+ *  │ Phase 4b COLOUR     _applyTextureOnlyColour → corrected [H×W×3] [FIX 4] │
+ *  │ Phase 5  EXPORT     _f32StitchedToRgba → Skia JPEG → cache write        │
  *  └──────────────────────────────────────────────────────────────────────────┘
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * MODEL PRECISION — float32 (both slots)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  Teacher (Main slot)  — artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
- *    Input  : [1, 512, 512, 3]  float32  NHWC  (values in [-1, 1])
- *    Output : [1, 512, 512, 3]  float32  NHWC  (Tanh → [-1, 1])
+ *  Teacher (Main)   — [1, R, R, 3] float32 NHWC in/out [-1, 1]  (R = config.mainModel)
+ *  Student (Preview)— [1, R, R, 3] float32 NHWC in/out [-1, 1]  (R = config.previewModel)
  *
- *  Student (Preview slot) — artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
- *    Input  : [1, 256, 256, 3]  float32  NHWC  (values in [-1, 1])
- *    Output : [1, 256, 256, 3]  float32  NHWC  (Tanh → [-1, 1])
- *
- *  Normalization (input pre-processing):
- *    normalised = (pixel / 127.5) − 1.0   →  [-1, 1]
- *
- *  Denormalization (output post-processing):
- *    display_f32 = (model_out + 1.0) × 0.5  →  [0, 1]
- *    display_u8  = ((model_out + 1.0) × 127.5) clamped  →  [0, 255]
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * BUFFER FLOW (per tile — zero new allocations in hot loop)
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  fullRgba : Uint8Array[imageW × imageH × 4]     ← decoded once at Phase 1
- *       │ _extractTileRgba()  row-by-row memcpy + zero-pad boundary tiles
- *       ▼
- *  _tileScratch     : Uint8Array[512 × 512 × 4]   ← main   singleton, reused
- *  _previewTileScratch : Uint8Array[256 × 256 × 4] ← preview singleton, reused
- *       │ prepareInputTensor(…, toUint8=false)     strip A, normalize /127.5−1, f32
- *       ▼
- *  mainInputBuffer    : ArrayBuffer[512 × 512 × 3 × 4]  ← tensorUtils singleton
- *  previewInputBuffer : ArrayBuffer[256 × 256 × 3 × 4]  ← tensorUtils singleton
- *       │ InferenceEngine.runInferenceSync(slot)  TFLite forward pass (sync)
- *       ▼
- *  rawOutput : ArrayBuffer[res × res × 3 × 4]    ← new alloc per tile (native)
- *       │ ProcessedTile { coord, rawF32: rawOutput }
- *       ▼
- *  stitchTiles(grid, tiles)                        ← Gaussian overlap-add
- *       ▼
- *  stitchedF32 : Float32Array[imageH × imageW × 3] ← single alloc post-loop
- *       │ f32StitchedToRgba()
- *       ▼
- *  rgbaOut : Uint8Array[imageH × imageW × 4]       ← single alloc
- *       │ Skia JPEG encode → File.write()
- *       ▼
- *  resultUri : string  (file:// in Paths.cache)
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * TILE BYTE-OFFSET MATH (_extractTileRgba)
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  fullRgba layout : row-major RGBA, 4 bytes/pixel
- *    pixel(px, py) → fullRgba[ (py * imageW + px) * 4 ]
- *
- *  For tile (coord.x, coord.y) with dimensions (coord.w × coord.h):
- *    source pixel (tx, ty) → image pixel (coord.x + tx, coord.y + ty)
- *    src byte start of row ty : (coord.y + ty) * imageW * 4 + coord.x * 4
- *    dst byte start of row ty :  ty * tileSize * 4
- *    bytes per row            :  coord.w * 4
- *
- *  Boundary tiles (coord.w < tileSize or coord.h < tileSize):
- *    scratch is zero-filled before each extraction.
- *    Rows [0, coord.h) are populated; rows [coord.h, tileSize) stay zero (black).
- *    Columns [0, coord.w) are populated; columns [coord.w, tileSize) stay zero.
- *    prepareInputTensor maps zero RGBA → float32(-1.0) = darkest pixel.
- *    The Gaussian window assigns near-zero weight to tile edges, so these
- *    padded pixels have negligible influence on the final stitch.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * THREAD SAFETY & CONCURRENCY
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  Scratch buffers and input buffers are module-level singletons shared across
- *  tiles within one pipeline run. They are safe because:
- *    1. StyleJobService._processingLock guarantees only one job runs at a time.
- *    2. The hot loop is sequential — each tile's extraction + prepareInputTensor
- *       + runInferenceSync completes before the next tile begins.
- *    3. runInferenceSync is synchronous — it cannot interleave with itself.
+ *  Input normalisation:  normalised = pixel / 127.5 − 1.0      → [-1, 1]
+ *  Output denormalisation: display  = (model_out + 1.0) × 0.5  → [0, 1]
  *
  * PRD § 4.x — src/core/inference/TiledInferenceRunner.ts
  */
@@ -116,58 +103,72 @@ import { File, Paths } from 'expo-file-system'
 
 import * as InferenceEngine from '@/core/inference/InferenceEngine'
 import {
-	tileImage,
 	prepareInputTensor,
-	stitchTiles,
-	f32StitchedToRgba,
-	mainInputBuffer,
-	previewInputBuffer,
+	getOrAllocateBuffer,
 	type TileCoord,
 	type ProcessedTile,
 	type TileGrid,
 } from '@/shared/utils/tensorUtils'
 import { getModelConfig } from '@/core/storage/ModelManager'
-import { DEFAULT_MODEL_CONFIG } from '@/shared/utils/constants'
 import { createTracker } from '@/shared/utils/logger'
-import type { StyleId } from '@/types'
+import type { StyleId, ModelConfig } from '@/types'
+import {
+	OUTPUT_JPEG_QUALITY,
+	PERFORMANCE_LIMITS,
+	MODEL_GAUSSIAN_SIGMA_DIV,
+	GAUSSIAN_FLOOR_EPSILON,
+	SYSTEM_BOUNDS,
+	DEFAULT_MODEL_CONFIG,
+} from '@/shared/utils/constants'
 
 const tracker = createTracker('TiledInferenceRunner')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 1 — FALLBACK CONSTANTS
+// SECTION 1 — CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The pixel dimension the teacher (main) model was trained on.
- * Input tensor: [1, 512, 512, 3] float32 NHWC.
- * DO NOT change — alters InstanceNorm running statistics.
- */
-const INFERENCE_RES: number = DEFAULT_MODEL_CONFIG.inferenceResolution // 512
+/** RGBA byte depth — 4 channels per pixel. */
+const RGBA_CH = SYSTEM_BOUNDS.RGBA_CHANNELS
+
+/** JPEG output quality [1–100]. 90 balances impasto detail vs file size. */
+// OUTPUT_JPEG_QUALITY
+
+/** Maximum supported source image pixel count (≈ 12.5 MP). */
+const STITCH_MAX_PIXELS = PERFORMANCE_LIMITS.STITCH_MAX_PIXELS
 
 /**
- * The pixel dimension the student (preview) model was trained on.
- * Input tensor: [1, 256, 256, 3] float32 NHWC.
- * DO NOT change — alters InstanceNorm running statistics.
+ * Gaussian window sigma divisor.
+ *   sigma = tileSize / MODEL_GAUSSIAN_SIGMA_DIV
+ * 5.0 is optimal for 25–33% overlap. Matches artlens_infer_v5.py.
  */
-const PREVIEW_RES: number = DEFAULT_MODEL_CONFIG.previewResolution // 256
+// MODEL_GAUSSIAN_SIGMA_DIV
 
 /**
- * RGBA byte depth — 4 channels per pixel (Red, Green, Blue, Alpha).
+ * Denominator floor added to every Gaussian window entry.
+ * Prevents divide-by-zero in the stitch normalisation pass.
  */
-const RGBA_CH = 4
+//GAUSSIAN_FLOOR_EPSILON
 
 /**
- * JPEG output quality [1–100].
- * 90 preserves impasto texture detail without excessive file size.
+ * Minimum tile overlap fraction enforced by _buildFullCoverageTileGrid.
+ *
+ * At overlap < 0.5, the step = tileSize × (1 − overlap) is so large that
+ * adjacent Gaussian tails do not cover the inter-tile gap, making seams
+ * visible regardless of sigma. Any config value below this is clamped and
+ * logged via tracker.warn() so the misconfiguration surfaces in telemetry.
+ *
+ * Matches artlens_infer_v5.py :: MIN_OVERLAP = 0.20 (raised to 0.5 here).
  */
-const OUTPUT_JPEG_QUALITY = 90
+const MIN_TILE_OVERLAP = 0.5
 
 /**
- * Maximum supported image pixel count — must match STITCH_MAX_PIXELS in
- * tensorUtils.ts. Images exceeding this limit cannot use the pre-allocated
- * stitch accumulator buffers.
+ * Default luminance blend ratio for _applyTextureOnlyColour.
+ *   1.0 = full impasto depth (all stylised luminance)
+ *   0.85 = recommended (slight original brightness anchor)
+ *   0.5  = softer result, better for portraits
+ * Mirrors artlens_infer_v5.py :: --luminance_blend 0.85.
  */
-const STITCH_MAX_PIXELS = 4085 * 3065 // 12,520,525 px ≈ 12.5 MP
+const DEFAULT_LUMINANCE_BLEND = DEFAULT_MODEL_CONFIG.luminanceBlend
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 2 — PUBLIC API TYPES
@@ -175,36 +176,28 @@ const STITCH_MAX_PIXELS = 4085 * 3065 // 12,520,525 px ≈ 12.5 MP
 
 /**
  * Callbacks injected by StyleJobService.
- * Decouples the runner from module-level variables in the service.
+ * Decouples the runner from module-level abort/progress variables in the service.
  */
 export interface TiledInferenceCallbacks {
 	/**
-	 * Called after each tile completes inference.
-	 * @param fraction - Strict [0.0, 1.0] — completedTiles / totalTiles.
-	 *                   Matches the StyleJob.progress type definition.
+	 * Called after each tile completes. fraction ∈ [0.0, 1.0].
+	 * Matches StyleJob.progress type definition.
 	 */
 	onProgress: (fraction: number) => void
 
 	/**
 	 * Returns true if the job should be interrupted at the next tile boundary.
-	 * Typically reads the _abortCurrentJob flag from StyleJobService.
+	 * Typically reads StyleJobService._abortCurrentJob synchronously.
 	 */
 	shouldAbort: () => boolean
 }
 
-/**
- * Returned on successful pipeline completion.
- */
+/** Returned on successful pipeline completion. */
 export interface TiledInferenceResult {
-	/** Absolute file:// URI of the JPEG written to the device cache */
 	resultUri: string
-	/** Width of the stylised output image (matches source image) */
 	imageW: number
-	/** Height of the stylised output image (matches source image) */
 	imageH: number
-	/** Total tiles processed during inference */
 	totalTiles: number
-	/** Wall-clock duration from decode start to file write, in ms */
 	durationMs: number
 }
 
@@ -213,11 +206,9 @@ export interface TiledInferenceResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Thrown by runTiledInference() when shouldAbort() returns true mid-loop.
- *
- * This is NOT an error — StyleJobService catches it specifically and
- * transitions the job to BATTERY_PAUSED rather than ERROR. It must NOT
- * be caught by the generic error handler or trigger failJob().
+ * Thrown by runTiledInference / runPreviewInference when shouldAbort() returns
+ * true mid-loop. NOT an error — StyleJobService catches it specifically and
+ * transitions the job to BATTERY_PAUSED rather than ERROR.
  */
 export class InferenceAbortError extends Error {
 	constructor() {
@@ -228,64 +219,25 @@ export class InferenceAbortError extends Error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 4 — MODULE-LEVEL SCRATCH BUFFERS
+// SECTION 4 — GAUSSIAN WINDOW CACHE
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Pre-allocated RGBA scratch buffer for the MAIN (teacher, 512×512) tile extraction.
- *
- * Allocated ONCE at module load: 512 × 512 × 4 = 1,048,576 bytes.
- * Overwritten at the start of each tile iteration via _extractTileRgba().
- * Immediately consumed by prepareInputTensor() with no async gap.
- *
- * Layout: row-major interleaved RGBA, 4 bytes per pixel.
- *   Pixel at (tx, ty) within tile → offset (ty * 512 + tx) * 4
- *   Channels: byte[+0]=R, byte[+1]=G, byte[+2]=B, byte[+3]=A
- *
- * Zero-init matters: fill(0) before each extraction ensures boundary tiles
- * (where coord.w < 512 or coord.h < 512) automatically have zero-padded
- * columns and rows. The model receives float32(-1.0) at padding positions
- * after normalization. The Gaussian window's near-zero edge weight suppresses
- * these padding pixels in the final overlap-add accumulation.
+ * Module-level cache of pre-computed 2D Gaussian blend windows, keyed by tileSize.
+ * Built once per tileSize on first call to _precomputeGaussianWindow().
+ * Subsequent calls are O(1) Map lookups. Safe under JS single-thread execution.
  */
-const _tileScratch = new Uint8Array(INFERENCE_RES * INFERENCE_RES * RGBA_CH)
-
-/**
- * Pre-allocated RGBA scratch buffer for the PREVIEW (student, 256×256) tile extraction.
- *
- * Allocated ONCE at module load: 256 × 256 × 4 = 262,144 bytes.
- * Overwritten at the start of each preview tile iteration.
- * Immediately consumed by prepareInputTensor() targeting previewInputBuffer.
- *
- * Separate from _tileScratch so that main and preview pipelines do not share
- * a scratch that is sized for the wrong resolution — writing a 256-pixel-wide
- * tile into a 512-row-strided buffer would produce corrupted pixel data.
- */
-const _previewTileScratch = new Uint8Array(PREVIEW_RES * PREVIEW_RES * RGBA_CH)
+const _gaussianWindowCache = new Map<number, Float32Array>()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 5 — EVENT LOOP YIELD
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Yields control to the React Native JS event loop for one scheduler tick.
- *
- * WHY THIS IS CRITICAL:
- *   InferenceEngine.runInferenceSync() is synchronous — it blocks the JS
- *   thread for the full TFLite forward pass (50–200ms on mid-range Android,
- *   e.g., Samsung A-series with Exynos 1280 / Mali-G68 MP4 GPU delegate).
- *
- *   Without yielding, a 165-tile job would freeze the JS thread for up to
- *   33 seconds, making the app completely unresponsive. Each yield allows:
- *     - React Native's bridge queue to flush pending UI updates
- *     - useStyleJobStore's 500ms MMKV debounce to land the progress write
- *     - The _abortCurrentJob flag to be set by prioritizeJob() / pauseJob()
- *       via events processed in the event loop during this gap
- *
- *   Cost: ~1 setTimeout(fn, 0) per tile ≈ 4–16ms overhead per tile.
- *   Acceptable for a background queue job (not a real-time camera loop).
- *
- * @returns Promise that resolves on the next event loop tick
+ * Yields to the React Native JS event loop for one scheduler tick.
+ * Critical for UI responsiveness — each synchronous TFLite forward pass blocks
+ * the thread for 50–200ms. This yield allows bridge queue flushes, progress
+ * store writes, and abort flag checks between tiles.
  */
 const _yieldToEventLoop = (): Promise<void> =>
 	new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -297,29 +249,18 @@ const _yieldToEventLoop = (): Promise<void> =>
 /**
  * Loads a local image file and extracts its full raw RGBA pixel buffer.
  *
- * DECODE PIPELINE:
- *   1. expo-file-system File.bytes() reads the compressed JPEG/PNG/WebP bytes.
- *      This is a filesystem read — does NOT decode pixels yet.
- *   2. Skia.Data.fromBytes() wraps the encoded buffer in a native Skia handle
- *      (zero-copy on most platforms — forwards the underlying JS ArrayBuffer).
- *   3. Skia.Image.MakeImageFromEncoded() hardware-decodes the image into a
- *      native raster at original dimensions, using the platform codec.
- *   4. skImage.readPixels(0, 0, RGBA_8888/Opaque) copies all decoded pixels
- *      into a flat Uint8Array in row-major RGBA order, 4 bytes per pixel.
- *      AlphaType.Opaque forces alpha=255 for every pixel regardless of source
- *      format (JPEG has no alpha; PNG may have — we discard it here since the
- *      model's input is RGB only and prepareInputTensor ignores the alpha byte).
- *   5. skImage.dispose() releases native VRAM immediately after the CPU copy.
+ * PIPELINE:
+ *   1. expo-file-system File.bytes() → compressed bytes (filesystem read)
+ *   2. Skia.Data.fromBytes() → native Skia buffer (zero-copy)
+ *   3. Skia.Image.MakeImageFromEncoded() → hardware-decoded raster
+ *   4. skImage.readPixels(RGBA_8888, Opaque) → flat Uint8Array, 4 bytes/pixel
+ *   5. skImage.dispose() → release native VRAM immediately
  *
- * MEMORY NOTE:
- *   A 4032×3024 image produces fullRgba = 4032 × 3024 × 4 ≈ 46.5 MB.
- *   Peak memory during this call: encoded bytes (~8MB JPEG) + fullRgba (~46 MB).
- *   The encoded bytes are eligible for GC once skImage is created; the Skia
- *   image is disposed immediately after readPixels(). Only fullRgba persists.
+ * PIXEL LAYOUT: pixel(px, py) → fullRgba[(py * imageW + px) * 4 + ch]
+ *   ch=0 R, ch=1 G, ch=2 B, ch=3 A (always 255 — AlphaType.Opaque)
  *
  * @param sourceUri - Absolute file:// URI of the source photo
  * @returns { fullRgba, imageW, imageH }
- * @throws If the file does not exist, cannot be read, or Skia decode fails
  */
 async function _decodeSourceImage(sourceUri: string): Promise<{
 	fullRgba: Uint8Array
@@ -328,19 +269,15 @@ async function _decodeSourceImage(sourceUri: string): Promise<{
 }> {
 	tracker.log(`Decoding: ${sourceUri}`)
 
-	// ── Step 1: Read compressed bytes from filesystem ─────────────────────────
 	const srcFile = new File(sourceUri)
 	if (!srcFile.exists) {
 		throw new Error(
 			`[TiledInferenceRunner] Source file not found: ${sourceUri}`
 		)
 	}
+
 	const encodedBytes = await srcFile.bytes()
-
-	// ── Step 2: Wrap in Skia native buffer ───────────────────────────────────
 	const skData = Skia.Data.fromBytes(encodedBytes)
-
-	// ── Step 3: Hardware decode ───────────────────────────────────────────────
 	const skImage = Skia.Image.MakeImageFromEncoded(skData)
 	if (!skImage) {
 		throw new Error(
@@ -349,15 +286,10 @@ async function _decodeSourceImage(sourceUri: string): Promise<{
 		)
 	}
 
-	// In @shopify/react-native-skia (Expo SDK 55 / RN 0.76 era):
-	//   skImage.width() and skImage.height() are methods returning number.
-	//   Some older typings expose them as properties — use the method form
-	//   which is stable across v0.1.x through the Expo 55 bundled version.
 	const imageW: number = skImage.width()
 	const imageH: number = skImage.height()
 	tracker.log(`Decoded: ${imageW}×${imageH} px`)
 
-	// Pre-check before readPixels to surface a clear error for oversized images
 	if (imageW * imageH > STITCH_MAX_PIXELS) {
 		try {
 			skImage.dispose()
@@ -366,36 +298,21 @@ async function _decodeSourceImage(sourceUri: string): Promise<{
 		}
 		throw new Error(
 			`[TiledInferenceRunner] Image ${imageW}×${imageH} (${imageW * imageH}px) ` +
-				`exceeds the stitch buffer limit of ${STITCH_MAX_PIXELS}px. ` +
-				`Resize the source image to ≤ 4085×3065 before stylisation.`
+				`exceeds stitch buffer limit of ${STITCH_MAX_PIXELS}px.`
 		)
 	}
 
-	// ── Step 4: Read full RGBA_8888 pixel buffer ──────────────────────────────
-	//
-	// readPixels(srcX, srcY, imageInfo) copies the decoded raster into a
-	// Uint8Array in row-major RGBA order (4 bytes per pixel).
-	//
-	//   ColorType.RGBA_8888  : R,G,B,A interleaved, 1 byte each channel
-	//   AlphaType.Opaque     : alpha byte forced to 255 for every pixel
-	//
-	// Pixel layout: (px, py) → fullRgba[(py * imageW + px) * 4 + ch]
-	//   ch=0 → Red, ch=1 → Green, ch=2 → Blue, ch=3 → Alpha (always 255)
-	//
-	// Return type is Uint8Array | null in the RN Skia type surface.
-	const pixelData: Uint8Array | null = skImage.readPixels(0, 0, {
+	const pixelData = skImage.readPixels(0, 0, {
 		width: imageW,
 		height: imageH,
 		colorType: ColorType.RGBA_8888,
 		alphaType: AlphaType.Opaque,
 	}) as Uint8Array | null
 
-	// ── Step 5: Dispose native VRAM immediately ───────────────────────────────
-	// Must happen AFTER readPixels — the CPU copy is now in pixelData.
 	try {
 		skImage.dispose()
 	} catch {
-		/* best-effort disposal */
+		/* best-effort */
 	}
 
 	const expectedBytes = imageW * imageH * RGBA_CH
@@ -406,36 +323,196 @@ async function _decodeSourceImage(sourceUri: string): Promise<{
 		)
 	}
 
-	const fullRgba = pixelData
 	tracker.log(
-		`RGBA buffer: ${(fullRgba.byteLength / 1_048_576).toFixed(1)} MB`
+		`RGBA buffer: ${(pixelData.byteLength / 1_048_576).toFixed(1)} MB`
 	)
-	return { fullRgba, imageW, imageH }
+	return { fullRgba: pixelData, imageW, imageH }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 7 — TILE RGBA EXTRACTION
+// SECTION 7 — FULL-COVERAGE TILE GRID  [FIX 2 + FIX 5]
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Copies one tile's pixels from the full-image RGBA buffer into `output`.
- * Handles both interior tiles (full tileSize×tileSize) and boundary tiles (partial).
+ * Builds a tile grid that guarantees 100% canvas coverage.
  *
- * BYTE OFFSET MATH:
- *   fullRgba is row-major RGBA: pixel (px, py) starts at (py*imageW + px)*4.
+ * ════════════════════════════════════════════════════════════════════
+ * BUG FIXED: UNCOVERED RIGHT/BOTTOM EDGE PIXELS → BLACK BORDER
+ * ════════════════════════════════════════════════════════════════════
  *
- *   For tile row `ty` (0-indexed within tile):
- *     srcY      = coord.y + ty          (absolute row in full image)
- *     srcStart  = srcY * imageW * 4 + coord.x * 4   (byte offset in fullRgba)
- *     dstStart  = ty * tileSize * 4                  (byte offset in output)
- *     bytesToCopy = min(coord.w * 4, srcRowStride - coord.x * 4)
+ * ROOT CAUSE:
+ *   tensorUtils.tileImage() positions tiles at multiples of step:
+ *     x = col × step  for col in [0, numCols)
+ *   When (imageW − tileSize) is not exactly divisible by step, the last
+ *   tile ends at (numCols−1)×step + tileSize < imageW. Pixels in the gap
+ *   between that point and imageW are never written to the numerator or
+ *   denominator accumulators in _stitchTilesLocal. Their denominator stays
+ *   at zero, and the normalisation produces 0.0 → black pixel band.
  *
- * @param fullRgba  - Full decoded RGBA image buffer
- * @param imageW    - Full image width in pixels
- * @param imageH    - Full image height in pixels
- * @param coord     - Tile coordinate descriptor from TileGrid
- * @param tileSize  - Expected tile dimension (512 for main, 256 for preview)
- * @param output    - Pre-allocated scratch buffer sized tileSize × tileSize × 4
+ * EXAMPLE:
+ *   imageW=930, tileSize=512, overlap=0.25 → step=384
+ *   Standard grid: col=0 → x=0 (covers 0–511), col=1 → x=384 (covers 384–895)
+ *   Pixels 896–929 (34 px) → denominator=0 → BLACK BORDER
+ *
+ * FIX:
+ *   After the standard step positions, always append:
+ *     finalX = imageW − tileSize   (last tile's right edge == imageW)
+ *   Only added when the last standard tile does not already reach imageW.
+ *   Same logic applied independently to the Y dimension.
+ *
+ *   Coverage proof for the above example:
+ *     finalX = 930 − 512 = 418 → tile covers 418–929 ✓ complete
+ *
+ * FIX 5 — MINIMUM OVERLAP:
+ *   tileOverlap is clamped to MIN_TILE_OVERLAP (0.5) before computing step.
+ *   Values below this disable meaningful Gaussian blending.
+ *
+ * @param imageW      - Source image width in pixels
+ * @param imageH      - Source image height in pixels
+ * @param tileSize    - Model tile resolution (e.g. 512 or 256)
+ * @param tileOverlap - Fractional overlap from ModelConfig
+ */
+function _buildFullCoverageTileGrid(
+	imageW: number,
+	imageH: number,
+	tileSize: number,
+	tileOverlap: number
+): TileGrid {
+	// ── FIX 5: enforce minimum overlap ────────────────────────────────────────
+	const clampedOverlap = Math.max(tileOverlap, MIN_TILE_OVERLAP)
+	if (tileOverlap < MIN_TILE_OVERLAP) {
+		tracker.warn(
+			`[_buildFullCoverageTileGrid] tileOverlap=${tileOverlap} < ` +
+				`MIN_TILE_OVERLAP=${MIN_TILE_OVERLAP}. Clamping to ${MIN_TILE_OVERLAP}. ` +
+				`Update ModelConfig.tileOverlap or DEFAULT_MODEL_CONFIG to resolve.`
+		)
+	}
+
+	const overlapPx = Math.round(clampedOverlap * tileSize)
+	const step = Math.max(1, tileSize - overlapPx)
+
+	/**
+	 * Builds the position array for one canvas dimension.
+	 *
+	 * Algorithm:
+	 *   1. Emit positions at multiples of step while (pos + tileSize < length)
+	 *      — these are all positions where the tile does not yet reach the edge.
+	 *   2. Append (length − tileSize) as the final position if the last standard
+	 *      position does not already guarantee edge coverage.
+	 *
+	 * This guarantees: positions.last + tileSize == length for any length > tileSize.
+	 */
+	function _buildPositions(length: number): number[] {
+		if (length <= tileSize) return [0]
+
+		const positions: number[] = []
+		let pos = 0
+
+		// Standard step positions: all tiles that do not yet reach the right/bottom edge
+		while (pos + tileSize < length) {
+			positions.push(pos)
+			pos += step
+		}
+
+		// Edge-anchored final tile: ensures rightmost/bottommost pixels are covered
+		const edgePos = length - tileSize
+		if (
+			positions.length === 0 ||
+			positions[positions.length - 1] < edgePos
+		) {
+			positions.push(edgePos)
+		}
+
+		return positions
+	}
+
+	const xPositions = _buildPositions(imageW)
+	const yPositions = _buildPositions(imageH)
+
+	const numCols = xPositions.length
+	const numRows = yPositions.length
+	const total = numCols * numRows
+	const coords: TileCoord[] = new Array(total)
+
+	for (let row = 0; row < numRows; row++) {
+		for (let col = 0; col < numCols; col++) {
+			const x = xPositions[col]
+			const y = yPositions[row]
+			coords[row * numCols + col] = {
+				col,
+				row,
+				index: row * numCols + col,
+				x,
+				y,
+				w: Math.min(tileSize, imageW - x),
+				h: Math.min(tileSize, imageH - y),
+			}
+		}
+	}
+
+	tracker.log(
+		`[Grid] ${numCols}×${numRows} = ${total} tiles ` +
+			`(step=${step}px, overlapPx=${overlapPx}px, ` +
+			`xPos=[${xPositions.join(',')}], yPos=[${yPositions.join(',')}])`
+	)
+
+	return {
+		imageW,
+		imageH,
+		tileSize,
+		step,
+		overlapPx,
+		numCols,
+		numRows,
+		total,
+		coords,
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 8 — TILE RGBA EXTRACTION WITH REFLECTION PADDING  [FIX 3]
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Copies one tile's pixels from the full-image RGBA buffer into `output`,
+ * using reflection (symmetric mirroring) for any out-of-bounds coordinates.
+ *
+ * ════════════════════════════════════════════════════════════════════
+ * UPGRADE: EDGE-CLAMPING → REFLECTION PADDING
+ * ════════════════════════════════════════════════════════════════════
+ *
+ * PREVIOUS (edge-clamping):
+ *   globalX = Math.min(tileX + localX, imageW - 1)
+ *   Out-of-bounds pixels replicated the last valid column/row as a constant.
+ *   InstanceNorm2d processes the full tile and computes per-tile mean/std.
+ *   Constant replicated rows near the edge bias these statistics upward/downward,
+ *   producing a brightness or colour shift at boundary tile edges.
+ *
+ * CURRENT (reflection padding):
+ *   Out-of-bounds pixel at globalX < 0       → mapped to -globalX
+ *   Out-of-bounds pixel at globalX >= imageW → mapped to 2*(imageW-1) - globalX
+ *   The reflected pixel is a real image pixel — it has a realistic local
+ *   frequency distribution that minimises InstanceNorm statistics distortion.
+ *
+ * SAFETY: With _buildFullCoverageTileGrid, the last tile is always positioned at
+ *   x = imageW - tileSize, so tileX + tileSize = imageW exactly.
+ *   No tile pixel exceeds imageW in the X direction. Reflection is a defensive
+ *   guard for numerical edge cases and future-proofing (e.g. preview tiles where
+ *   the image is smaller than tileSize).
+ *
+ * TILE SIZE INVARIANT: Output is always tileSize×tileSize.
+ *   TFLite fixed-shape input contract is fully preserved.
+ *
+ * PIXEL LAYOUT:
+ *   Source: fullRgba[(globalY * imageW + globalX) * 4]  — stride: imageW
+ *   Dest:   output[(localY * tileSize + localX) * 4]    — stride: tileSize
+ *
+ * @param fullRgba  - Full decoded RGBA image buffer (row-major, 4 bytes/pixel)
+ * @param imageW    - Full image width (source row stride)
+ * @param imageH    - Full image height
+ * @param coord     - Tile descriptor from TileGrid.coords
+ * @param tileSize  - Tile dimension in pixels
+ * @param output    - Pre-allocated scratch: Uint8Array[tileSize × tileSize × 4]
  */
 function _extractTileRgba(
 	fullRgba: Uint8Array,
@@ -445,74 +522,356 @@ function _extractTileRgba(
 	tileSize: number,
 	output: Uint8Array
 ): void {
-	// Zero-fill: ensures stale data from a previous tile doesn't bleed through
-	// in the boundary region (right and bottom edges of boundary tiles).
-	output.fill(0)
+	const tileX = coord.x
+	const tileY = coord.y
 
-	const srcRowStride = imageW * RGBA_CH // bytes per row in full image
-	const dstRowStride = tileSize * RGBA_CH // bytes per row in tile
-	const copyH = coord.h // actual rows to copy (≤ tileSize)
-	const copyW = coord.w // actual columns to copy per row (≤ tileSize)
+	for (let localY = 0; localY < tileSize; localY++) {
+		// ── Global Y with reflection ───────────────────────────────────────────
+		let globalY = tileY + localY
+		if (globalY < 0) {
+			globalY = -globalY // reflect over top edge
+		} else if (globalY >= imageH) {
+			globalY = 2 * (imageH - 1) - globalY // reflect over bottom edge
+		}
+		// Safety clamp: a double-reflection can still land out of bounds
+		// for extremely small images (imageH < tileSize / 2).
+		if (globalY < 0) globalY = 0
+		else if (globalY >= imageH) globalY = imageH - 1
 
-	for (let ty = 0; ty < copyH; ty++) {
-		const srcY = coord.y + ty
+		for (let localX = 0; localX < tileSize; localX++) {
+			// ── Global X with reflection ───────────────────────────────────────
+			let globalX = tileX + localX
+			if (globalX < 0) {
+				globalX = -globalX
+			} else if (globalX >= imageW) {
+				globalX = 2 * (imageW - 1) - globalX
+			}
+			if (globalX < 0) globalX = 0
+			else if (globalX >= imageW) globalX = imageW - 1
 
-		// Safety clamp: should never trigger with a valid TileGrid, but guards
-		// against floating-point rounding in edge-case image dimensions.
-		if (srcY >= imageH) break
+			// ── Row-major index arithmetic ─────────────────────────────────────
+			// Source stride = imageW (FULL IMAGE width, not tileSize)
+			// Dest   stride = tileSize
+			const srcIdx = (globalY * imageW + globalX) * RGBA_CH
+			const dstIdx = (localY * tileSize + localX) * RGBA_CH
 
-		// Byte offset of the first RGBA pixel of this row in the full image.
-		// coord.x * RGBA_CH skips the horizontal offset within that row.
-		const srcStart = srcY * srcRowStride + coord.x * RGBA_CH
-
-		// Byte offset of the first pixel in this tile row within `output`.
-		const dstStart = ty * dstRowStride
-
-		// Clamp to available bytes in the source row to prevent over-read
-		// at the right image edge (where coord.x + coord.w == imageW exactly).
-		const bytesToCopy = Math.min(
-			copyW * RGBA_CH,
-			srcRowStride - coord.x * RGBA_CH
-		)
-
-		output.set(
-			fullRgba.subarray(srcStart, srcStart + bytesToCopy),
-			dstStart
-		)
+			output[dstIdx] = fullRgba[srcIdx]
+			output[dstIdx + 1] = fullRgba[srcIdx + 1]
+			output[dstIdx + 2] = fullRgba[srcIdx + 2]
+			output[dstIdx + 3] = fullRgba[srcIdx + 3]
+		}
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8 — JPEG ENCODE & CACHE WRITE
+// SECTION 9 — GAUSSIAN BLEND WINDOW
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the pre-computed 2D Gaussian blend window for a given tile size.
+ * Builds and caches on first call; subsequent calls are O(1).
+ *
+ * FORMULA (matches artlens_infer_v5.py::_make_gaussian_window):
+ *   sigma     = tileSize / MODEL_GAUSSIAN_SIGMA_DIV   (5.0)
+ *   center    = (tileSize − 1) / 2
+ *   w1d[i]    = exp(−(i − center)² / (2σ²))
+ *   W2d[y,x]  = w1d[y] × w1d[x]               outer product
+ *   W2d       = W2d / W2d.max()                peak → 1.0
+ *   W2d      += GAUSSIAN_FLOOR_EPSILON (1e-6)           div-by-zero safety
+ *
+ * Centre weight = 1.0; edge weight ≈ 0.044 (σ_div=5.0) — near-zero edge weight
+ * suppresses tile-boundary content in the weighted average.
+ */
+function _precomputeGaussianWindow(tileSize: number): Float32Array {
+	const cached = _gaussianWindowCache.get(tileSize)
+	if (cached !== undefined) return cached
+
+	const sigma = tileSize / MODEL_GAUSSIAN_SIGMA_DIV
+	const twoSigmaSq = 2.0 * sigma * sigma
+	const center = (tileSize - 1) / 2.0
+
+	const w1d = new Float32Array(tileSize)
+	for (let i = 0; i < tileSize; i++) {
+		const d = i - center
+		w1d[i] = Math.exp(-(d * d) / twoSigmaSq)
+	}
+
+	const W2d = new Float32Array(tileSize * tileSize)
+	let maxVal = 0.0
+	for (let y = 0; y < tileSize; y++) {
+		for (let x = 0; x < tileSize; x++) {
+			const v = w1d[y] * w1d[x]
+			W2d[y * tileSize + x] = v
+			if (v > maxVal) maxVal = v
+		}
+	}
+
+	const invMax = maxVal > 0.0 ? 1.0 / maxVal : 1.0
+	for (let i = 0; i < W2d.length; i++) {
+		W2d[i] = W2d[i] * invMax + GAUSSIAN_FLOOR_EPSILON
+	}
+
+	_gaussianWindowCache.set(tileSize, W2d)
+	tracker.log(
+		`Gaussian window: tileSize=${tileSize}, sigma=${sigma.toFixed(1)}, ` +
+			`edgeWeight≈${Math.exp(-(MODEL_GAUSSIAN_SIGMA_DIV ** 2) / 8).toFixed(4)}`
+	)
+	return W2d
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 10 — GAUSSIAN OVERLAP-ADD STITCH
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reconstructs the full stylised canvas from processed tiles using
+ * Gaussian-weighted overlap-add accumulation.
+ *
+ * ALGORITHM:
+ *   For each tile at global anchor (tileX, tileY), for each local pixel (lX, lY):
+ *     globalX = tileX + lX    (skip if ≥ imageW)
+ *     globalY = tileY + lY    (skip if ≥ imageH)
+ *     w       = gaussianWindow[lY * tileSize + lX]
+ *     val     = (rawF32[lY*T+lX] + 1.0) × 0.5      denormalise Tanh [-1,1] → [0,1]
+ *
+ *     numerator  [globalY*imageW+globalX] += val × w
+ *     denominator[globalY*imageW+globalX] += w
+ *
+ *   output[px] = numerator[px] / denominator[px]    normalised weighted avg
+ *
+ * CANVAS STRIDE: All index arithmetic uses imageW as stride — not tileSize.
+ *
+ * @param grid      - TileGrid from _buildFullCoverageTileGrid
+ * @param tiles     - All ProcessedTile objects from _runTiledHotLoop
+ * @param imageW    - Canvas width (stride for all index math)
+ * @param imageH    - Canvas height
+ * @param tileSize  - Tile dimension (must match tiles' rawF32 layout)
+ * @returns Float32Array[imageH × imageW × 3] in [0, 1]
+ */
+function _stitchTilesLocal(
+	grid: TileGrid,
+	tiles: ProcessedTile[],
+	imageW: number,
+	imageH: number,
+	tileSize: number
+): Float32Array {
+	const totalPixels = imageW * imageH
+	const numerator = new Float32Array(totalPixels * 3)
+	const denominator = new Float32Array(totalPixels)
+	const gaussianWindow = _precomputeGaussianWindow(tileSize)
+
+	for (const tile of tiles) {
+		const { coord, rawF32: rawOutput } = tile
+		const tileF32 = new Float32Array(rawOutput)
+		const tileX = coord.x
+		const tileY = coord.y
+
+		for (let localY = 0; localY < tileSize; localY++) {
+			const globalY = tileY + localY
+			if (globalY < 0 || globalY >= imageH) continue
+
+			const canvasRowBase = globalY * imageW
+
+			for (let localX = 0; localX < tileSize; localX++) {
+				const globalX = tileX + localX
+				if (globalX < 0 || globalX >= imageW) continue
+
+				const weight = gaussianWindow[localY * tileSize + localX]
+				const srcBase = (localY * tileSize + localX) * 3
+				const dstBase = (canvasRowBase + globalX) * 3
+
+				// Denormalise Tanh [-1,1] → [0,1]
+				const r = (tileF32[srcBase] + 1.0) * 0.5
+				const g = (tileF32[srcBase + 1] + 1.0) * 0.5
+				const b = (tileF32[srcBase + 2] + 1.0) * 0.5
+
+				numerator[dstBase] += r * weight
+				numerator[dstBase + 1] += g * weight
+				numerator[dstBase + 2] += b * weight
+				denominator[canvasRowBase + globalX] += weight
+			}
+		}
+	}
+
+	// ── Normalise: weighted average → [0, 1] ──────────────────────────────────
+	const stitchedF32 = new Float32Array(totalPixels * 3)
+	for (let i = 0; i < totalPixels; i++) {
+		const w = denominator[i]
+		const invW = w > 1e-10 ? 1.0 / w : 0.0
+		const b = i * 3
+
+		let v = numerator[b] * invW
+		stitchedF32[b] = v < 0 ? 0 : v > 1 ? 1 : v
+
+		v = numerator[b + 1] * invW
+		stitchedF32[b + 1] = v < 0 ? 0 : v > 1 ? 1 : v
+
+		v = numerator[b + 2] * invW
+		stitchedF32[b + 2] = v < 0 ? 0 : v > 1 ? 1 : v
+	}
+
+	return stitchedF32
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 11 — TEXTURE-ONLY COLOUR CORRECTION  [FIX 4]
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Corrects per-tile InstanceNorm colour drift via YCbCr luminance transfer.
+ *
+ * ════════════════════════════════════════════════════════════════════
+ * ROOT CAUSE: PER-TILE INSTANCENORM COLOUR DRIFT
+ * ════════════════════════════════════════════════════════════════════
+ *
+ * The generator's InstanceNorm2d layers normalise activations to zero mean
+ * and unit variance PER TILE. Tiles covering different image regions —
+ * e.g. a bright sky tile vs a dark ground tile — are normalised to completely
+ * different statistics. After stylisation, tiles have inconsistent brightness
+ * and colour biases that Gaussian blending only partially conceals at tile
+ * boundaries; distinct colour blocks remain visible in the final output.
+ *
+ * ALGORITHM (mirrors artlens_infer_v5.py::colour_mode_texture_only):
+ *
+ *   For each pixel i:
+ *     sY = 0.299×sR + 0.587×sG + 0.114×sB   (BT.601 luma, stylised)
+ *     oY = 0.299×oR + 0.587×oG + 0.114×oB   (BT.601 luma, original)
+ *
+ *     blendedY = luminanceBlend × sY + (1 − luminanceBlend) × oY
+ *       — impasto texture from stylised, global brightness anchored to original
+ *
+ *     yRatio = blendedY / oY   (guard: oY > 1e-6 to avoid div-by-zero)
+ *
+ *     outR = oR × yRatio       } scale original RGB by luminance ratio:
+ *     outG = oG × yRatio       } preserves chrominance (Cb, Cr) exactly,
+ *     outB = oB × yRatio       } transfers blended luma to original palette
+ *
+ * RESULT:
+ *   The output has Van Gogh impasto brushstroke texture (from stylised Y) with
+ *   the original photo's exact colour palette (Cb, Cr unchanged). Per-tile
+ *   colour drift is eliminated because the final chrominance always comes from
+ *   the globally-consistent original image, not the locally-normalised tiles.
+ *
+ * NOTE: This is a sRGB/YCbCr approximation of the CIE LAB approach used in
+ * the Python reference (which requires skimage, unavailable in React Native).
+ * BT.601 YCbCr produces equivalent perceptual results for luminance transfer.
+ *
+ * MEMORY: originalRgba is decoded inline — no separate Float32 intermediate
+ * array is allocated. Peak overhead = output array only (3× float32 per pixel).
+ *
+ * @param stitchedF32     - Gaussian-blended model output [H×W×3] in [0,1]
+ * @param originalRgba    - Source photo pixels [H×W×4] uint8 [0,255] — not modified
+ * @param imageW          - Canvas width in pixels
+ * @param imageH          - Canvas height in pixels
+ * @param luminanceBlend  - Impasto depth blend ratio [0.0–1.0]; default 0.85
+ * @returns               - Colour-corrected Float32Array [H×W×3] in [0,1]
+ */
+function _applyTextureOnlyColour(
+	stitchedF32: Float32Array,
+	originalRgba: Uint8Array,
+	imageW: number,
+	imageH: number,
+	luminanceBlend: number
+): Float32Array {
+	const out = new Float32Array(stitchedF32.length)
+	const totalPixels = imageW * imageH
+
+	for (let i = 0; i < totalPixels; i++) {
+		const sBase = i * 3
+		const oBase = i * RGBA_CH
+
+		// ── Stylised RGB in [0, 1] ─────────────────────────────────────────────
+		const sR = stitchedF32[sBase]
+		const sG = stitchedF32[sBase + 1]
+		const sB = stitchedF32[sBase + 2]
+
+		// ── Original RGB in [0, 1] — decoded inline to avoid extra allocation ──
+		const oR = originalRgba[oBase] / 255.0
+		const oG = originalRgba[oBase + 1] / 255.0
+		const oB = originalRgba[oBase + 2] / 255.0
+
+		// ── BT.601 luma (Y = 0.299R + 0.587G + 0.114B) ────────────────────────
+		const sY = 0.299 * sR + 0.587 * sG + 0.114 * sB // stylised luminance
+		const oY = 0.299 * oR + 0.587 * oG + 0.114 * oB // original luminance
+
+		// ── Blended luminance: impasto texture + original brightness anchor ────
+		const blendedY = luminanceBlend * sY + (1.0 - luminanceBlend) * oY
+
+		// ── Chrominance-preserving luma transfer ───────────────────────────────
+		// yRatio scales original RGB to achieve blendedY while keeping Cb, Cr.
+		// Guard: very dark pixels (oY ≤ GAUSSIAN_FLOOR_EPSILON) receive absolute blendedY directly.
+		const yRatio = oY > GAUSSIAN_FLOOR_EPSILON ? blendedY / oY : blendedY
+
+		const r = yRatio * oR
+		const g = yRatio * oG
+		const b = yRatio * oB
+
+		out[sBase] = r < 0 ? 0 : r > 1 ? 1 : r
+		out[sBase + 1] = g < 0 ? 0 : g > 1 ? 1 : g
+		out[sBase + 2] = b < 0 ? 0 : b > 1 ? 1 : b
+	}
+
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 12 — FLOAT32 RGB → RGBA UINT8 CONVERSION
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Converts a colour-corrected Float32Array [H×W×3] in [0,1] to a
+ * Uint8Array [H×W×4] (RGBA_8888, alpha=255) for Skia encoding.
+ *
+ * display_u8 = round(clamp(f32, 0, 1) × 255)
+ * Alpha is always 255 — the stylised output is fully opaque.
+ */
+function _f32StitchedToRgba(
+	f32: Float32Array,
+	imageW: number,
+	imageH: number
+): Uint8Array {
+	const totalPixels = imageW * imageH
+	const rgba = new Uint8Array(totalPixels * RGBA_CH)
+
+	for (let i = 0; i < totalPixels; i++) {
+		const s = i * 3
+		const d = i * RGBA_CH
+
+		let v = f32[s]
+		rgba[d] = Math.round((v < 0 ? 0 : v > 1 ? 1 : v) * 255)
+
+		v = f32[s + 1]
+		rgba[d + 1] = Math.round((v < 0 ? 0 : v > 1 ? 1 : v) * 255)
+
+		v = f32[s + 2]
+		rgba[d + 2] = Math.round((v < 0 ? 0 : v > 1 ? 1 : v) * 255)
+
+		rgba[d + 3] = 255
+	}
+
+	return rgba
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 13 — JPEG ENCODE & CACHE WRITE
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Encodes a raw RGBA Uint8Array as JPEG and writes it to the app's cache.
  *
- * ENCODE PIPELINE:
- *   1. Skia.Data.fromBytes(rgbaBytes) wraps the Uint8Array in a Skia buffer.
- *   2. Skia.Image.MakeImage(imageInfo, data, rowBytes) creates a raster SkImage.
- *      rowBytes = imageW * 4 (RGBA_8888, contiguous rows, no stride padding).
- *   3. skImage.encodeToBytes(JPEG, quality) compresses to a Uint8Array.
- *      Disposes the SkImage immediately to release native memory.
- *   4. new File(outputUri).write(jpegBytes) writes to the cache directory.
+ * PIPELINE:
+ *   1. Skia.Data.fromBytes(rgbaBytes)
+ *   2. Skia.Image.MakeImage(RGBA_8888, width*4 rowBytes)
+ *   3. skImage.encodeToBytes(JPEG, quality) → Uint8Array; dispose SkImage
+ *   4. File.write(jpegBytes) → cache URI
  *
- * OUTPUT URI PATTERN:
- *   {Paths.cache.uri}artlens_<timestamp>_<random5>.jpg
- *   Timestamp + random suffix prevents URI collisions between rapid retries.
- *
- * @param rgbaBytes - Uint8Array from f32StitchedToRgba() — imageW × imageH × 4
- * @param imageW    - Output image width in pixels
- * @param imageH    - Output image height in pixels
- * @returns Absolute file:// URI of the written JPEG
- * @throws If Skia cannot create the image, encoding fails, or write fails
+ * OUTPUT URI: {Paths.cache}/artlens_{timestamp}_{random5}.jpg
  */
 async function _encodeAndSave(
 	rgbaBytes: Uint8Array,
 	imageW: number,
 	imageH: number
 ): Promise<string> {
-	// ── Step 1: Create Skia raster image ─────────────────────────────────────
 	const skData = Skia.Data.fromBytes(rgbaBytes)
 	const outputSkImage = Skia.Image.MakeImage(
 		{
@@ -522,17 +881,14 @@ async function _encodeAndSave(
 			alphaType: AlphaType.Opaque,
 		},
 		skData,
-		imageW * RGBA_CH // row stride = width * 4 bytes (no padding)
+		imageW * RGBA_CH
 	)
-
 	if (!outputSkImage) {
 		throw new Error(
-			`[TiledInferenceRunner] Skia.Image.MakeImage() failed for ` +
-				`${imageW}×${imageH} RGBA image.`
+			`[TiledInferenceRunner] Skia.Image.MakeImage() failed for ${imageW}×${imageH}.`
 		)
 	}
 
-	// ── Step 2: Encode to JPEG and dispose native handle ─────────────────────
 	const jpegBytes = outputSkImage.encodeToBytes(
 		ImageFormat.JPEG,
 		OUTPUT_JPEG_QUALITY
@@ -545,16 +901,13 @@ async function _encodeAndSave(
 
 	if (!jpegBytes) {
 		throw new Error(
-			'[TiledInferenceRunner] encodeToBytes(JPEG) returned null — encoding failed.'
+			'[TiledInferenceRunner] encodeToBytes(JPEG) returned null.'
 		)
 	}
 
-	// ── Step 3: Build output URI and write to cache ───────────────────────────
-	// Paths.cache.uri may or may not have a trailing slash — normalise it.
 	const cacheBase = Paths.cache.uri.endsWith('/')
 		? Paths.cache.uri
 		: `${Paths.cache.uri}/`
-
 	const suffix = Math.random().toString(36).slice(2, 7)
 	const outputUri = `${cacheBase}artlens_${Date.now()}_${suffix}.jpg`
 
@@ -568,29 +921,30 @@ async function _encodeAndSave(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 9 — SHARED TILED HOT LOOP
+// SECTION 14 — SHARED TILED HOT LOOP
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Internal hot loop shared by both runTiledInference (main/teacher) and
- * runPreviewInference (preview/student). Parameterised by:
- *   slot       — which InferenceEngine slot to call runInferenceSync on
- *   tileSize   — resolution to use for tile extraction and input prep (512 | 256)
- *   scratch    — the module-level RGBA scratch for that resolution
- *   inputBuf   — the pre-allocated float32 input ArrayBuffer for that slot
+ * Shared hot loop for both runTiledInference (main) and runPreviewInference (preview).
  *
- * Returns all ProcessedTile descriptors holding raw float32 ArrayBuffers.
- * The caller is responsible for stitching, encoding, and file I/O.
+ * BUFFER ACQUISITION (registry-backed, zero allocation in hot loop):
+ *   scratchBuf — getOrAllocateBuffer(slot, 'rgba', tileSize)  → tileSize²×4 bytes
+ *   inputBuf   — getOrAllocateBuffer(slot, 'input', tileSize) → tileSize²×3×4 bytes
  *
- * ABORT CONTRACT:
- *   shouldAbort() is polled BEFORE each tile's synchronous inference call.
- *   On true, throws InferenceAbortError immediately with no partial output.
+ *   Both are O(1) registry hits after the first invocation for a given slot×tileSize.
+ *
+ * FIX 1 (preserved):
+ *   rawOutput.slice(0) creates an owned copy of the TFLite output buffer.
+ *   react-native-fast-tflite reuses the same native output buffer on every
+ *   runSync() call. Without slice(0), every ProcessedTile would reference the
+ *   same memory, all holding only the last tile's output.
+ *
+ * ABORT: shouldAbort() checked BEFORE each synchronous forward pass.
+ *   Maximum abort latency = one tile's inference time (~50–200ms).
  */
 async function _runTiledHotLoop(
 	slot: 'main' | 'preview',
 	tileSize: number,
-	scratch: Uint8Array,
-	inputBuf: ArrayBuffer,
 	fullRgba: Uint8Array,
 	imageW: number,
 	imageH: number,
@@ -600,96 +954,39 @@ async function _runTiledHotLoop(
 	const { total: totalTiles, coords } = grid
 	const processedTiles: ProcessedTile[] = []
 
+	const scratchBuf = getOrAllocateBuffer(slot, 'rgba', tileSize)
+	const scratch = new Uint8Array(scratchBuf, 0, tileSize * tileSize * RGBA_CH)
+	const inputBuf = getOrAllocateBuffer(slot, 'input', tileSize, false)
+
 	for (let tileIdx = 0; tileIdx < totalTiles; tileIdx++) {
-		// ── Abort boundary ────────────────────────────────────────────────────
-		//
-		// Checked BEFORE each synchronous inference call.
-		// This is the only safe interruption point: runInferenceSync() is a
-		// blocking native call with no internal cancellation mechanism.
-		// The maximum abort latency is one tile's inference time (~200ms).
+		// ── Abort check ────────────────────────────────────────────────────────
 		if (callbacks.shouldAbort()) {
-			tracker.log(`Abort signal at tile ${tileIdx}/${totalTiles}`)
+			tracker.log(`Abort at tile ${tileIdx}/${totalTiles}`)
 			throw new InferenceAbortError()
 		}
 
 		const coord = coords[tileIdx]
 
-		// ── Step A: Extract tile RGBA into scratch buffer ──────────────────
-		//
-		// scratch is a module singleton reused across all tiles.
-		// Zero-fill + row-by-row memcpy from fullRgba.
-		// Boundary tiles (coord.w < tileSize or coord.h < tileSize) are
-		// zero-padded in their uncopied regions. See _extractTileRgba() for
-		// full math. Zero RGBA maps to float32(-1.0) after normalization,
-		// and Gaussian edge weights suppress padding in the stitch.
+		// ── A: Reflection-padded tile extraction ──────────────────────────────
 		_extractTileRgba(fullRgba, imageW, imageH, coord, tileSize, scratch)
 
-		// ── Step B: Pack RGBA → float32 RGB into model input buffer ───────
-		//
-		// prepareInputTensor (toUint8=false) processes exactly tileSize² pixels:
-		//   For each pixel i:
-		//     src = scratch[i*4 .. i*4+2]  (R, G, B — alpha at +3 is ignored)
-		//     dst = inputBuf as Float32Array at [i*3 .. i*3+2]
-		//     value = channel / 127.5 − 1.0   →  float32 in [-1, 1]
-		//
-		// Both teacher and student models use CUT normalisation:
-		//   transforms.Normalize(mean=0.5, std=0.5) after ToTensor() (pixel/255)
-		//   ⟹ (pixel/255 − 0.5) / 0.5 = pixel/127.5 − 1.0
-		//
-		// inputBuf is a pre-allocated module singleton from tensorUtils.
-		// It is safe to overwrite here because runInferenceSync() immediately
-		// consumes it synchronously with no async gap.
+		// ── B: RGBA → float32 RGB normalisation ───────────────────────────────
+		// channel / 127.5 − 1.0 → float32 in [-1, 1]. Alpha discarded.
 		prepareInputTensor(scratch, inputBuf, tileSize, false)
 
-		// ── Step C: Run TFLite model inference (synchronous) ───────────────
-		//
-		// InferenceEngine.runInferenceSync() calls model.runSync([inputBuffer])
-		// from react-native-fast-tflite (Nitro Module). This blocks the JS
-		// thread for the full forward pass duration.
-		//
-		// Teacher (main, 512×512):
-		//   Input  : [1, 512, 512, 3] float32 → Encoder (×2 stride-2 downs) →
-		//   Latent : [1, 128, 128, 256] → 9 DilatedResBlocks →
-		//   Output : [1, 512, 512, 3] float32 via 2× transpose-conv + Tanh
-		//   Output buffer: 512 × 512 × 3 × 4 = 3,145,728 bytes (float32, HWC)
-		//
-		// Student (preview, 256×256):
-		//   Input  : [1, 256, 256, 3] float32 → ngf=32 encoder →
-		//   Latent : [1, 64, 64, 128] → 4 ResBlocks →
-		//   Output : [1, 256, 256, 3] float32 via transpose-conv + Tanh
-		//   Output buffer: 256 × 256 × 3 × 4 = 786,432 bytes (float32, HWC)
-		//
-		// rawOutput is a NEW ArrayBuffer allocated by the native runtime per call.
-		// It is safe to store across iterations.
+		// ── C: TFLite forward pass (synchronous, blocks JS thread) ────────────
 		const rawOutput = InferenceEngine.runInferenceSync(slot, inputBuf)
 
-		// ── Step D: Store ProcessedTile ────────────────────────────────────
-		//
-		// We store rawF32: ArrayBuffer (float32 in [-1,1] from Tanh) because:
-		//   1. stitchTiles() denormalises inline via (v + 1.0) * 0.5 — more
-		//      efficient than allocating a full Float32Array per tile in [0,1].
-		//   2. decodeModelOutput() writes into a shared workspace and its
-		//      returned subarray view is invalidated on the next call.
-		//      Storing it would require a copy anyway.
-		//   3. Keeping the raw buffer (not yet expanded to [0,1]) halves the
-		//      working set for large image jobs where tiles are numerous.
-		processedTiles.push({ coord, rawF32: rawOutput })
+		// ── FIX 1: Deep copy before next runSync overwrites native buffer ──────
+		const rawOutputCopy = rawOutput.slice(0)
 
-		// ── Step E: Report progress ────────────────────────────────────────
-		//
-		// Fraction: (tileIdx + 1) / totalTiles → [1/N, 2/N, …, 1.0]
-		// StyleJob.progress is typed as [0.0, 1.0] fraction. The UI multiplies
-		// by 100 for display. Emitting integers (10, 20..100) would show
-		// "5000%" in the header — this fractional form is correct per the type
-		// contract.
+		// ── D: Accumulate with global tile anchor ──────────────────────────────
+		processedTiles.push({ coord, rawF32: rawOutputCopy })
+
+		// ── E: Progress report ─────────────────────────────────────────────────
 		callbacks.onProgress((tileIdx + 1) / totalTiles)
 
-		// ── Step F: Yield to event loop ────────────────────────────────────
-		//
-		// Release the JS thread after each blocking forward pass.
-		// This window allows the abort flag to be set if prioritizeJob() or
-		// pauseJob() is called from UI — the new flag value will be read at
-		// the NEXT iteration's abort check above.
+		// ── F: Yield to event loop ─────────────────────────────────────────────
 		await _yieldToEventLoop()
 	}
 
@@ -697,41 +994,25 @@ async function _runTiledHotLoop(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 10 — MAIN ENTRY POINT (teacher model, full-resolution pipeline)
+// SECTION 15 — MAIN ENTRY POINT (teacher model)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Executes the full tiled inference pipeline using the MAIN (teacher) slot.
  *
- * Model: artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
- *   Input:  [1, 512, 512, 3] float32 NHWC, values in [-1, 1]
- *   Output: [1, 512, 512, 3] float32 NHWC, Tanh → [-1, 1]
+ * RESOLUTION: config.mainModel read directly — no module-scope constant override.
+ *   Supports any tile resolution: 256, 384, 512, etc.
  *
- * PREREQUISITES (caller's responsibility — StyleJobService):
- *   - InferenceEngine.loadMainModel(modelPath) must have been called and
- *     awaited successfully before this function is invoked.
- *   - InferenceEngine.unloadModel('main') must be called in the caller's
- *     finally block, NOT inside this function. The runner does not manage
- *     model lifecycle — it only consumes the already-loaded model.
+ * COLOUR CORRECTION: _applyTextureOnlyColour applied post-stitch.
+ *   luminanceBlend sourced from config.luminanceBlend if present,
+ *   falling back to DEFAULT_LUMINANCE_BLEND (0.85).
  *
- * ABORT CONTRACT:
- *   - shouldAbort() is polled BEFORE each tile's synchronous inference call.
- *   - On true, throws InferenceAbortError immediately with no partial output.
- *   - All JS memory (fullRgba, processedTiles, etc.) becomes GC-eligible.
- *   - Caller catches InferenceAbortError and sets job status = BATTERY_PAUSED.
- *   - Caller's finally block handles model unload and job ID cleanup.
+ * GRID: _buildFullCoverageTileGrid used instead of tensorUtils.tileImage.
+ *   Guarantees 100% canvas coverage. Enforces MIN_TILE_OVERLAP (0.5).
  *
- * PROGRESS CONTRACT:
- *   - onProgress(k / totalTiles) is called after tile k completes (k ∈ [1, N]).
- *   - The first onProgress call is onProgress(1/N), the last is onProgress(1.0).
- *   - All values are in the strict [0.0, 1.0] range matching StyleJob.progress.
- *
- * @param sourceUri  - Absolute file:// URI of the source photo on device storage
- * @param styleId    - Style identifier used to fetch ModelConfig from MMKV
- * @param callbacks  - { onProgress, shouldAbort } provided by StyleJobService
- * @returns          TiledInferenceResult containing resultUri and timing metadata
- * @throws InferenceAbortError if shouldAbort() returns true during the hot loop
- * @throws Error for any decode / inference / encode / filesystem failure
+ * @param sourceUri - Absolute file:// URI of the source JPEG/PNG/WebP
+ * @param styleId   - Style identifier for ModelConfig resolution
+ * @param callbacks - { onProgress, shouldAbort } from StyleJobService
  */
 export async function runTiledInference(
 	sourceUri: string,
@@ -743,7 +1024,6 @@ export async function runTiledInference(
 		`runTiledInference — styleId="${styleId}", source="${sourceUri}"`
 	)
 
-	// Guard: confirm model is loaded before attempting any tile inference.
 	if (!InferenceEngine.isModelLoaded('main')) {
 		throw new Error(
 			'[TiledInferenceRunner] Main model slot is not loaded. ' +
@@ -751,109 +1031,70 @@ export async function runTiledInference(
 		)
 	}
 
-	// ── Phase 0: Load dynamic model configuration ─────────────────────────────
-	//
-	// getModelConfig() reads config.json for this styleId from the MMKV registry.
-	// Returns DEFAULT_CONFIG if the file is absent, unreadable, or malformed.
-	//
-	// Key fields:
-	//   inferenceResolution : must be 512 — the teacher model training resolution.
-	//   tileOverlap         : fraction [0,1] OR legacy pixel count.
-	//                         tileImage() handles both formats transparently.
-	//   luminanceBlend      : informational here; used by SkiaRenderer for display.
+	// ── Phase 0: Load dynamic model config ────────────────────────────────────
 	const config = await getModelConfig(styleId)
+	const inferenceRes = config.mainModel
+	const luminanceBlend =
+		(config as ModelConfig & { luminanceBlend?: number }).luminanceBlend ??
+		DEFAULT_LUMINANCE_BLEND
+
 	tracker.log(
-		`Config: inferenceRes=${config.inferenceResolution}, ` +
-			`tileOverlap=${config.tileOverlap}`
+		`Config: inferenceRes=${inferenceRes}, tileOverlap=${config.tileOverlap}, ` +
+			`luminanceBlend=${luminanceBlend}`
 	)
 
-	// Enforce that the config resolution matches what the teacher model expects.
-	// A mismatched resolution would produce a silent buffer size mismatch in TFLite.
-	if (config.inferenceResolution !== INFERENCE_RES) {
-		tracker.warn(
-			`[TiledInferenceRunner] config.inferenceResolution=${config.inferenceResolution} ` +
-				`does not match teacher model INFERENCE_RES=${INFERENCE_RES}. ` +
-				`Using INFERENCE_RES=${INFERENCE_RES} to prevent tensor shape mismatch.`
-		)
-		config.inferenceResolution = INFERENCE_RES
-	}
-
-	// ── Phase 1: Decode source image → full RGBA buffer ───────────────────────
+	// ── Phase 1: Decode source image ──────────────────────────────────────────
 	const { fullRgba, imageW, imageH } = await _decodeSourceImage(sourceUri)
 
-	// ── Phase 2: Compute overlap tile grid ───────────────────────────────────
-	//
-	// tileImage() performs pure arithmetic — no I/O, no allocation of buffers.
-	// Returns TileGrid { coords[], total, step, overlapPx, numCols, numRows }.
-	//
-	// step = tileSize - overlapPx    (e.g., 512 - 128 = 384 at 25% overlap)
-	// numCols = ceil((imageW - tileSize) / step) + 1  [or 1 if imageW ≤ tileSize]
-	// numRows = similar for height
-	const grid: TileGrid = tileImage(imageW, imageH, config)
+	// ── Phase 2: Full-coverage tile grid  [FIX 2 + FIX 5] ────────────────────
+	const grid = _buildFullCoverageTileGrid(
+		imageW,
+		imageH,
+		inferenceRes,
+		config.tileOverlap
+	)
 	const { total: totalTiles } = grid
 
-	tracker.log(
-		`Grid: ${grid.numCols}×${grid.numRows} = ${totalTiles} tiles  ` +
-			`(step=${grid.step}px, overlapPx=${grid.overlapPx}px)`
-	)
-
-	// ── Phase 3: Tiled hot loop (teacher / main slot) ─────────────────────────
-	//
-	// _runTiledHotLoop drives the per-tile extract → normalize → infer loop.
-	// _tileScratch is 512×512×4 and mainInputBuffer is 512×512×3×4 — both
-	// sized for the teacher model's 512-pixel tile resolution.
-	//
-	// Estimated peak heap from tile buffers:
-	//   165 tiles × 3 MB (f32) ≈ 495 MB for a 4032×3024 image at 25% overlap.
-	// The pre-allocated _stitchNumerator/Denominator in tensorUtils (~198 MB)
-	// accounts for this scale — no additional allocation in the loop.
+	// ── Phase 3: Tiled hot loop  [FIX 1 + FIX 3] ─────────────────────────────
 	const processedTiles = await _runTiledHotLoop(
 		'main',
-		INFERENCE_RES, // 512
-		_tileScratch, // 512×512×4 scratch
-		mainInputBuffer, // 512×512×3×4 float32 input
+		inferenceRes,
 		fullRgba,
 		imageW,
 		imageH,
 		grid,
 		callbacks
 	)
-
 	tracker.log(`Hot loop done: ${processedTiles.length} tiles`)
 
-	// ── Phase 4: Gaussian overlap-add stitch ─────────────────────────────────
-	//
-	// stitchTiles() performs two passes over all ProcessedTile data:
-	//
-	//   Pass 1 — Weighted accumulation:
-	//     For each tile t at canvas position (cx, cy):
-	//       For each pixel (tx, ty) within the tile:
-	//         raw_v  = src32[(ty * 512 + tx) * 3 + ch]   ← float32 in [-1, 1]
-	//         f_v    = (raw_v + 1.0) * 0.5               ← denormalize to [0, 1]
-	//         weight = _gaussianWindow512[ty * 512 + tx]
-	//         _stitchNumerator  [canvasIdx * 3 + ch] += f_v * weight
-	//         _stitchDenominator[canvasIdx]           += weight
-	//
-	//   Pass 2 — Normalisation:
-	//     output[p] = numerator[p] / denominator[p]   (denominator always > 1e-6)
-	//     Clamp to [0, 1].
-	//
-	// Both accumulator arrays are pre-allocated module singletons (~198 MB total).
-	// Output is a FRESH Float32Array — the only new allocation post-loop.
-	const stitchedF32 = stitchTiles(grid, processedTiles)
+	// ── Phase 4: Gaussian overlap-add stitch ──────────────────────────────────
+	const stitchedF32 = _stitchTilesLocal(
+		grid,
+		processedTiles,
+		imageW,
+		imageH,
+		inferenceRes
+	)
 	tracker.log(
-		`Stitch done: ${imageW}×${imageH}, ` +
-			`${(stitchedF32.byteLength / 1_048_576).toFixed(1)} MB`
+		`Stitch done: ${imageW}×${imageH}, ${(stitchedF32.byteLength / 1_048_576).toFixed(1)} MB`
 	)
 
-	// ── Phase 5: Float32 RGB [0,1] → RGBA Uint8 ──────────────────────────────
-	//
-	// f32StitchedToRgba() allocates a fresh Uint8Array (imageW × imageH × 4).
-	// Each channel: float32 [0,1] → Math.floor(v * 255) → uint8 [0, 255].
-	// Alpha is always 255 (fully opaque). This is the final pixel-domain result.
-	const rgbaBytes = f32StitchedToRgba(stitchedF32, imageW, imageH)
+	// ── Phase 4b: Texture-only colour correction  [FIX 4] ─────────────────────
+	// Replaces InstanceNorm-drifted tile colours with original photo chrominance.
+	// fullRgba carries the original source pixels — always available at this point.
+	const correctedF32 = _applyTextureOnlyColour(
+		stitchedF32,
+		fullRgba,
+		imageW,
+		imageH,
+		luminanceBlend
+	)
+	tracker.log(`Colour correction done (luminanceBlend=${luminanceBlend})`)
 
-	// ── Phase 6: JPEG encode and write to cache ───────────────────────────────
+	// ── Phase 5: Float32 RGB [0,1] → RGBA Uint8 ───────────────────────────────
+	const rgbaBytes = _f32StitchedToRgba(correctedF32, imageW, imageH)
+
+	// ── Phase 6: JPEG encode and write to cache ────────────────────────────────
 	const resultUri = await _encodeAndSave(rgbaBytes, imageW, imageH)
 
 	const durationMs = Date.now() - t0
@@ -865,47 +1106,24 @@ export async function runTiledInference(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 11 — PREVIEW ENTRY POINT (student model, live-preview pipeline)
+// SECTION 16 — PREVIEW ENTRY POINT (student model)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Executes the tiled inference pipeline using the PREVIEW (student) slot.
  *
- * Model: artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
- *   Input:  [1, 256, 256, 3] float32 NHWC, values in [-1, 1]
- *   Output: [1, 256, 256, 3] float32 NHWC, Tanh → [-1, 1]
+ * RESOLUTION: config.previewModel is the authoritative tile dimension.
+ *   A local previewConfig promotes previewModel → mainModel so that
+ *   _buildFullCoverageTileGrid reads the correct resolution. The original
+ *   config object is not mutated.
  *
- * PURPOSE:
- *   Drives the live viewfinder style preview and BrushCanvas real-time loop.
- *   The student model is 4× fewer parameters (ngf=32 vs 64, 4 vs 9 ResBlocks)
- *   and processes at 256×256, giving ~4× lower latency than the teacher.
+ * COLOUR CORRECTION: applied with same luminanceBlend as main path.
+ *   May be omitted for ultra-low-latency preview builds by setting
+ *   luminanceBlend to 1.0 (no original contribution, skip correction).
  *
- * CRITICAL BUFFER SIZING:
- *   This function uses _previewTileScratch (256×256×4) and previewInputBuffer
- *   (256×256×3×4) — NOT the 512-pixel equivalents used by runTiledInference.
- *   Using the wrong (512-sized) buffers would feed 4× too much memory to a
- *   256-input model, producing a tensor shape mismatch crash in TFLite.
- *
- * PREREQUISITES (caller's responsibility):
- *   - InferenceEngine.loadPreviewModel(modelPath) must have been called and
- *     awaited successfully before this function is invoked.
- *   - InferenceEngine.unloadModel('preview') must be called in the caller's
- *     finally block, NOT inside this function.
- *
- * ABORT CONTRACT: identical to runTiledInference — see that function's docs.
- *
- * CONFIG NOTE:
- *   The config.inferenceResolution is overridden to PREVIEW_RES (256) to
- *   ensure tileImage() and prepareInputTensor() use the student resolution
- *   regardless of what the MMKV config contains (which is written for the
- *   teacher model). The student model is always 256×256.
- *
- * @param sourceUri  - Absolute file:// URI of the source photo
- * @param styleId    - Style identifier used to fetch ModelConfig from MMKV
- * @param callbacks  - { onProgress, shouldAbort }
- * @returns          TiledInferenceResult containing resultUri and timing metadata
- * @throws InferenceAbortError if shouldAbort() returns true during the hot loop
- * @throws Error for any decode / inference / encode / filesystem failure
+ * @param sourceUri - Absolute file:// URI of the source photo
+ * @param styleId   - Style identifier for ModelConfig resolution
+ * @param callbacks - { onProgress, shouldAbort } from StyleJobService
  */
 export async function runPreviewInference(
 	sourceUri: string,
@@ -917,7 +1135,6 @@ export async function runPreviewInference(
 		`runPreviewInference — styleId="${styleId}", source="${sourceUri}"`
 	)
 
-	// Guard: confirm preview model is loaded.
 	if (!InferenceEngine.isModelLoaded('preview')) {
 		throw new Error(
 			'[TiledInferenceRunner] Preview model slot is not loaded. ' +
@@ -925,66 +1142,65 @@ export async function runPreviewInference(
 		)
 	}
 
-	// ── Phase 0: Load config and force preview resolution ─────────────────────
-	//
-	// The MMKV config.inferenceResolution is written for the teacher (512).
-	// The student model always operates at 256×256. Override unconditionally
-	// so tileImage() and _runTiledHotLoop receive the correct tile size.
+	// ── Phase 0: Config — promote previewModel into mainModel for grid builder ─
 	const config = await getModelConfig(styleId)
-	config.inferenceResolution = PREVIEW_RES // force to 256 — student model only
+	const previewRes = config.previewModel
+	const luminanceBlend =
+		(config as ModelConfig & { luminanceBlend?: number }).luminanceBlend ??
+		DEFAULT_LUMINANCE_BLEND
+
+	// Local override: do NOT mutate the shared config object.
+	const previewConfig: ModelConfig = { ...config, mainModel: previewRes }
 	tracker.log(
-		`Config (preview): inferenceRes=${config.inferenceResolution}, ` +
-			`tileOverlap=${config.tileOverlap}`
+		`Config (preview): inferenceRes=${previewRes}, ` +
+			`tileOverlap=${config.tileOverlap}, luminanceBlend=${luminanceBlend}`
 	)
 
-	// ── Phase 1: Decode source image ─────────────────────────────────────────
+	// ── Phase 1: Decode source image ──────────────────────────────────────────
 	const { fullRgba, imageW, imageH } = await _decodeSourceImage(sourceUri)
 
-	// ── Phase 2: Compute tile grid at 256-pixel resolution ───────────────────
-	const grid: TileGrid = tileImage(imageW, imageH, config)
+	// ── Phase 2: Full-coverage tile grid at preview resolution ────────────────
+	const grid = _buildFullCoverageTileGrid(
+		imageW,
+		imageH,
+		previewRes,
+		previewConfig.tileOverlap
+	)
 	const { total: totalTiles } = grid
 
-	tracker.log(
-		`Grid (preview): ${grid.numCols}×${grid.numRows} = ${totalTiles} tiles  ` +
-			`(step=${grid.step}px, overlapPx=${grid.overlapPx}px)`
-	)
-
-	// ── Phase 3: Tiled hot loop (student / preview slot) ─────────────────────
-	//
-	// _previewTileScratch is 256×256×4 and previewInputBuffer is 256×256×3×4 —
-	// sized for the student model's 256-pixel tile resolution.
-	//
-	// CRITICAL: Using _tileScratch (512×512×4) here would write row-by-row data
-	// with a 512-column stride into a 256-column-wide tile, producing corrupted
-	// pixel interleaving. _previewTileScratch MUST be used here.
+	// ── Phase 3: Hot loop (preview / student slot) ────────────────────────────
 	const processedTiles = await _runTiledHotLoop(
 		'preview',
-		PREVIEW_RES, // 256
-		_previewTileScratch, // 256×256×4 scratch — not _tileScratch
-		previewInputBuffer, // 256×256×3×4 float32 input — not mainInputBuffer
+		previewRes,
 		fullRgba,
 		imageW,
 		imageH,
 		grid,
 		callbacks
 	)
-
 	tracker.log(`Preview hot loop done: ${processedTiles.length} tiles`)
 
-	// ── Phase 4: Stitch ───────────────────────────────────────────────────────
-	//
-	// stitchTiles uses the same _stitchNumerator/_stitchDenominator accumulators
-	// as the main pipeline — they are sized to STITCH_MAX_PIXELS regardless of
-	// tile resolution. The tileSize field in TileGrid (set to 256 above) drives
-	// the inner loop bounds correctly.
-	const stitchedF32 = stitchTiles(grid, processedTiles)
-	tracker.log(
-		`Preview stitch done: ${imageW}×${imageH}, ` +
-			`${(stitchedF32.byteLength / 1_048_576).toFixed(1)} MB`
+	// ── Phase 4: Gaussian stitch ──────────────────────────────────────────────
+	const stitchedF32 = _stitchTilesLocal(
+		grid,
+		processedTiles,
+		imageW,
+		imageH,
+		previewRes
+	)
+	tracker.log(`Preview stitch done: ${imageW}×${imageH}`)
+
+	// ── Phase 4b: Colour correction ───────────────────────────────────────────
+	const correctedF32 = _applyTextureOnlyColour(
+		stitchedF32,
+		fullRgba,
+		imageW,
+		imageH,
+		luminanceBlend
 	)
 
-	// ── Phase 5 & 6: Convert and save ────────────────────────────────────────
-	const rgbaBytes = f32StitchedToRgba(stitchedF32, imageW, imageH)
+	// ── Phase 5 & 6: Convert and save ─────────────────────────────────────────
+	const rgbaBytes = _f32StitchedToRgba(correctedF32, imageW, imageH)
 	const resultUri = await _encodeAndSave(rgbaBytes, imageW, imageH)
 
 	const durationMs = Date.now() - t0

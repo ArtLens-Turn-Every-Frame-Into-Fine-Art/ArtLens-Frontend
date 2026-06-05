@@ -56,6 +56,7 @@ interface StyleJobStoreActions {
 	enqueue: (payload: JobPayload) => JobId
 	startJob: (jobId: JobId) => void
 	updateJob: (jobId: JobId, updates: Partial<Omit<StyleJob, 'id'>>) => void
+	updateJobOutputUri: (jobId: string, newUri: string) => void
 	failJob: (jobId: JobId, errorReason: string) => void
 	prioritize: (jobId: JobId) => void
 	/** Sets status: 'ERROR' on the job (internal use — model deletion, hard fail). */
@@ -114,7 +115,7 @@ export const useStyleJobStore = create<StyleJobStore>((set) => ({
 		const newJob: StyleJob = {
 			id: newId,
 			...payload,
-			status: 'QUEUED',
+			status: payload.isPreview ? 'PREVIEW_QUEUED' : 'QUEUED',
 			progress: 0,
 			retryable: false,
 			createdAt: Date.now(),
@@ -128,7 +129,7 @@ export const useStyleJobStore = create<StyleJobStore>((set) => ({
 		const newJob: StyleJob = {
 			id: newId,
 			...payload,
-			status: 'QUEUED',
+			status: payload.isPreview ? 'PREVIEW_QUEUED' : 'QUEUED',
 			progress: 0,
 			retryable: false,
 			createdAt: Date.now(),
@@ -149,6 +150,14 @@ export const useStyleJobStore = create<StyleJobStore>((set) => ({
 		set((state) => ({
 			jobs: state.jobs.map((j) =>
 				j.id === jobId ? { ...j, ...updates } : j
+			),
+		}))
+	},
+
+	updateJobOutputUri: (jobId: string, newUri: string) => {
+		set((state) => ({
+			jobs: state.jobs.map((job) =>
+				job.id === jobId ? { ...job, outputUri: newUri } : job
 			),
 		}))
 	},

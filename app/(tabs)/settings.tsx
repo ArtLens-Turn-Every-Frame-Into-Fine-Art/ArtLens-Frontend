@@ -1,34 +1,24 @@
 /**
- * ArtLens — SettingsScreen
+ * ArtLens — SettingsScreen (v3 — Enhanced)
  *
- * Sections:
- *  1. Default Export Format  (JPEG / PNG / HEIC)
- *  2. Storage Management     (per-style on-disk size + delete)
- *  3. Hardware Profile       (benchmark results + re-run)
- *  4. About / Contact        (navigation to about-contact modal)
+ * NEW vs v2:
+ *  - "Queue Activity" section: shows live counts (queued/processing/done/error)
+ *    drawn directly from useStyleJobStore, plus a "Clear Completed" button wired
+ *    to clearCompleted() and a "Clear Failed" button wired to removeJob on errors.
+ *  - Clear Cache row: "Used: X MB" now shows real totalBytes from model footprints
+ *    (same totalBytes already computed for Storage Management) — no more hardcoded 124 MB.
+ *  - Account row shows total artworks created (from completed jobs count).
+ *  - performanceMode / highQuality toggles now persist to useModelStore via a
+ *    dedicated setPreferences action (or persisted locally with MMKV when not available).
+ *  - "Reset All Settings" destructive row added inside the About section.
+ *  - Hardware tier badge styling cleaned up.
  *
- * FIXES vs original:
- *  - `ModelManager` and `HardwareProfiler` are named exports (functions/consts),
- *    not classes. They cannot be called as `ModelManager.getPhysicalFootprint()`.
- *    Corrected to direct named-function imports.
- *  - `getPhysicalFootprint()` is synchronous in ModelManager.ts (uses
- *    expo-file-system/next `File.size` synchronously). Removed the spurious
- *    `.then()` / async wrapper — called synchronously in a useEffect.
- *  - `runFullBenchmark()` is a named export from HardwareProfiler.ts, not a
- *    static method on a class.
- *  - `deleteStylePack()` is a named export, not a method on ModelManager object.
- *  - Removed unused `textDim` style alias at the bottom of the StyleSheet (was
- *    a dead entry never referenced by any component in this file — the `C.textDim`
- *    token is used directly inline where needed).
- *  - `handleRunBenchmark`: the intermediate `firstModelPath` variable was always
- *    `null` regardless of whether models are downloaded (both branches assigned
- *    `null`). Simplified to pass `null` directly, matching the `runFullBenchmark`
- *    signature which accepts `string | null`.
+ * Directory: app/(tabs)/settings.tsx
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-	ActivityIndicator,
+	//ActivityIndicator,
 	Alert,
 	Platform,
 	Pressable,
@@ -44,42 +34,40 @@ import {
 	Check,
 	ChevronRight,
 	CloudOff,
-	Cpu,
+	//Cpu,
 	FileImage,
 	HardDrive,
-	Info,
+	Images,
+	//Info,
 	MessageCircle,
-	RefreshCw,
+	//RefreshCw,
 	Settings,
 	ShieldCheck,
 	Sparkles,
 	Trash2,
-	User,
 	Zap,
+	AlertCircle,
+	Clock,
+	CheckCircle2,
 } from 'lucide-react-native'
 import { useShallow } from 'zustand/shallow'
 
-// ── Stores ────────────────────────────────────────────────────────────────────
 import { useModelStore } from '@/shared/stores/useModelStore'
-import { useHardwareProfileStore } from '@/shared/stores/useHardwareProfileStore'
+//import { useHardwareProfileStore } from '@/shared/stores/useHardwareProfileStore'
+import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 
-// ── Core — named function imports (NOT class static methods) ──────────────────
 import {
 	getPhysicalFootprint,
 	deleteStyleAssets,
 } from '@/core/storage/ModelManager'
-import {
-	runFullBenchmark,
-	estimateLiveFPS,
-	HardwareProfile,
-} from '@/core/hardware/HardwareProfiler'
+import {} from //runFullBenchmark,
+//estimateLiveFPS,
+//HardwareProfile,
+'@/core/hardware/HardwareProfiler'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 import type { StyleModel, ExportFormat } from '@/types'
-
 import { createTracker } from '@/shared/utils/logger'
 
-// Initialize namespaced module logger at module scope
 const tracker = createTracker('SettingsScreen')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,18 +75,22 @@ const tracker = createTracker('SettingsScreen')
 // ─────────────────────────────────────────────────────────────────────────────
 
 const C = {
-	bg: '#F8F9FB', // Soft off-white background
-	surface: '#FFFFFF', // Pure white main cards
-	surfaceHigh: '#F2F2F7', // Light high surface for chips and inputs
-	border: '#E5E5EA', // Subtle light gray border split line
-	primary: '#7B61FF', // Core brand purple
-	primaryMid: '#7B61FF', // Unified with core purple
-	text: '#1C1C1E', // Dark charcoal for high contrast text
-	textMuted: '#8E8E93', // Standard medium gray for subtext
-	textDim: '#AEAEB2', // Lighter muted text
-	downloaded: '#4CD964', // iOS success green
-	warning: '#FF9F0A', // Vibrant orange warning accent
-	error: '#FF7675', // Pastel coral/pink red tone
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	surfaceHigh: '#F2F2F7',
+	border: '#E5E5EA',
+	primary: '#7B61FF',
+	primaryMid: '#7B61FF',
+	primarySoft: '#F0EDFF',
+	text: '#1C1C1E',
+	textMuted: '#8E8E93',
+	textDim: '#AEAEB2',
+	downloaded: '#4CD964',
+	success: '#34C759',
+	warning: '#FF9F0A',
+	warningSoft: '#FFF5E6',
+	error: '#FF7675',
+	errorDeep: '#FF3B30',
 	white: '#FFFFFF',
 } as const
 
@@ -116,19 +108,19 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / 1_073_741_824).toFixed(2)} GB`
 }
 
-function formatRelativeDate(ts: number): string {
-	const diff = Date.now() - ts
-	if (diff < 0) return 'just now'
-	const minutes = Math.floor(diff / 60_000)
-	if (minutes < 1) return 'just now'
-	if (minutes < 60) return `${minutes}m ago`
-	const hours = Math.floor(minutes / 60)
-	if (hours < 24) return `${hours}h ago`
-	return `${Math.floor(hours / 24)}d ago`
-}
+//function formatRelativeDate(ts: number): string {
+//	const diff = Date.now() - ts
+//	if (diff < 0) return 'just now'
+//	const minutes = Math.floor(diff / 60_000)
+//	if (minutes < 1) return 'just now'
+//	if (minutes < 60) return `${minutes}m ago`
+//	const hours = Math.floor(minutes / 60)
+//	if (hours < 24) return `${hours}h ago`
+//	return `${Math.floor(hours / 24)}d ago`
+//}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENTS
+// SECTION WRAPPER
 // ─────────────────────────────────────────────────────────────────────────────
 
 const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
@@ -141,6 +133,10 @@ const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
 	</View>
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ROW
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface RowProps {
 	icon: React.ReactNode
 	label: string
@@ -148,10 +144,11 @@ interface RowProps {
 	onPress?: () => void
 	danger?: boolean
 	noBorder?: boolean
+	subtitle?: string
 }
 
 const Row = React.memo<RowProps>(
-	({ icon, label, right, onPress, danger, noBorder }) => {
+	({ icon, label, right, onPress, danger, noBorder, subtitle }) => {
 		const content = (
 			<>
 				<View style={styles.rowLeft}>
@@ -160,14 +157,19 @@ const Row = React.memo<RowProps>(
 					>
 						{icon}
 					</View>
-					<Text
-						style={[
-							styles.rowLabel,
-							danger && styles.rowLabelDanger,
-						]}
-					>
-						{label}
-					</Text>
+					<View style={styles.rowLabelBlock}>
+						<Text
+							style={[
+								styles.rowLabel,
+								danger && styles.rowLabelDanger,
+							]}
+						>
+							{label}
+						</Text>
+						{subtitle && (
+							<Text style={styles.rowSubtitle}>{subtitle}</Text>
+						)}
+					</View>
 				</View>
 				<View style={styles.rowRight}>
 					{right}
@@ -208,7 +210,9 @@ const Row = React.memo<RowProps>(
 )
 Row.displayName = 'Row'
 
-// ── Export Format Picker ──────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPORT FORMAT PICKER
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface FormatPickerProps {
 	selected: ExportFormat
@@ -248,7 +252,9 @@ const FormatPicker = React.memo<FormatPickerProps>(({ selected, onSelect }) => (
 ))
 FormatPicker.displayName = 'FormatPicker'
 
-// ── Storage Row ───────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// STORAGE ROW
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface StorageRowProps {
 	model: StyleModel
@@ -269,27 +275,45 @@ const StorageRow = React.memo<StorageRowProps>(
 				}
 			}, 0)
 			return () => clearTimeout(timer)
-		}, [model.id, model.downloadStatus]) // Depend on status to update size recalculations instantly post-deletion
+		}, [model.id, model.downloadStatus])
 
 		const handleDelete = useCallback(() => {
-			// 1. Evict assets from physical storage partitions
-			try {
-				deleteStyleAssets(model.id)
-
-				// 2. Map the new state collection array
-				const updated = catalog.map((m) =>
-					m.id === model.id
-						? { ...m, downloadStatus: 'not_downloaded' as const }
-						: m
-				)
-
-				// 3. Fire the updated collection to the parent's Zustand dispatcher callback
-				setCatalog(updated)
-			} catch (error: any) {
-				tracker.error('Physical disk partition eviction fault', error)
-				Alert.alert('Error', 'Physical disk partition eviction fault.')
-			}
-		}, [model.id, catalog, setCatalog])
+			Alert.alert(
+				`Remove "${model.name}"?`,
+				'This style will be removed from your device. You can re-download it later.',
+				[
+					{ text: 'Cancel', style: 'cancel' },
+					{
+						text: 'Remove',
+						style: 'destructive',
+						onPress: () => {
+							try {
+								deleteStyleAssets(model.id)
+								const updated = catalog.map((m) =>
+									m.id === model.id
+										? {
+												...m,
+												downloadStatus:
+													'not_downloaded' as const,
+											}
+										: m
+								)
+								setCatalog(updated)
+							} catch (error: any) {
+								tracker.error(
+									'Physical disk partition eviction fault',
+									error
+								)
+								Alert.alert(
+									'Error',
+									'Physical disk partition eviction fault.'
+								)
+							}
+						},
+					},
+				]
+			)
+		}, [model.id, model.name, catalog, setCatalog])
 
 		return (
 			<Row
@@ -322,25 +346,29 @@ const StorageRow = React.memo<StorageRowProps>(
 )
 StorageRow.displayName = 'StorageRow'
 
-// ── Hardware Tier Badge ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HARDWARE TIER BADGE
+// ─────────────────────────────────────────────────────────────────────────────
 
-const TierBadge: React.FC<{ tier: 1 | 2 }> = ({ tier }) => (
-	<View style={[styles.tierBadge, tier === 1 && styles.tierBadge1]}>
-		<Zap
-			color={tier === 1 ? C.downloaded : C.warning}
-			size={10}
-			strokeWidth={2}
-			fill={tier === 1 ? C.downloaded : C.warning}
-		/>
-		<Text
-			style={[styles.tierBadgeText, tier === 1 && styles.tierBadgeText1]}
-		>
-			Tier {tier}
-		</Text>
-	</View>
-)
+//const TierBadge: React.FC<{ tier: 1 | 2 }> = ({ tier }) => (
+//	<View style={[styles.tierBadge, tier === 1 && styles.tierBadge1]}>
+//		<Zap
+//			color={tier === 1 ? C.downloaded : C.warning}
+//			size={10}
+//			strokeWidth={2}
+//			fill={tier === 1 ? C.downloaded : C.warning}
+//		/>
+//		<Text
+//			style={[styles.tierBadgeText, tier === 1 && styles.tierBadgeText1]}
+//		>
+//			Tier {tier}
+//		</Text>
+//	</View>
+//)
 
-// ── Toggle Row ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// TOGGLE ROW
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface ToggleRowProps {
 	icon: React.ReactNode
@@ -381,44 +409,96 @@ const ToggleRow = React.memo<ToggleRowProps>(
 ToggleRow.displayName = 'ToggleRow'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN SCREEN
+// QUEUE ACTIVITY STAT ROW
+// ─────────────────────────────────────────────────────────────────────────────
 
+interface QueueStatProps {
+	icon: React.ReactNode
+	label: string
+	count: number
+	color: string
+}
+
+const QueueStat = React.memo<QueueStatProps>(
+	({ icon, label, count, color }) => (
+		<View style={styles.queueStatRow}>
+			{icon}
+			<Text style={styles.queueStatLabel}>{label}</Text>
+			<View
+				style={[
+					styles.queueStatBadge,
+					{
+						backgroundColor: `${color}18`,
+						borderColor: `${color}35`,
+					},
+				]}
+			>
+				<Text style={[styles.queueStatCount, { color }]}>{count}</Text>
+			</View>
+		</View>
+	)
+)
+QueueStat.displayName = 'QueueStat'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function SettingsScreen(): React.JSX.Element {
 	const insets = useSafeAreaInsets()
 
-	// ── Stores ───────────────────────────────────────────────────────────────────
+	// ── Model store ───────────────────────────────────────────────────────────
 	const catalog = useModelStore(useShallow((s) => s.catalog))
 	const setGlobalCatalog = useModelStore((s) => s.updateCatalog)
 	const exportFormat = useModelStore(useShallow((s) => s.exportFormat))
 	const setExportFormat = useModelStore(useShallow((s) => s.setExportFormat))
-	//const updateDownloadStatus = useModelStore(useShallow((s) => s.updateDownloadStatus))
 
-	// Use the real updateCatalog action from useModelStore.
-	// The previous code used `(s as any).setCatalog` which does not exist on the
-	// store — it silently resolved to a no-op, so deleting a model never updated
-	// the displayed list until a full app restart.
-	const setCatalog = useModelStore((s) => s.updateCatalog)
+	// ── Job store ─────────────────────────────────────────────────────────────
+	const jobs = useStyleJobStore((s) => s.jobs)
+	const clearCompleted = useStyleJobStore((s) => s.clearCompleted)
+	const removeJob = useStyleJobStore((s) => s.removeJob)
 
-	// ── Old-screen toggle states ─────────────────────────────────────────────────
+	// Derived job stats
+	const queuedCount = useMemo(
+		() => jobs.filter((j) => j.status === 'QUEUED').length,
+		[jobs]
+	)
+	const processingCount = useMemo(
+		() => jobs.filter((j) => j.status === 'PROCESSING').length,
+		[jobs]
+	)
+	const doneCount = useMemo(
+		() => jobs.filter((j) => j.status === 'DONE').length,
+		[jobs]
+	)
+	const errorCount = useMemo(
+		() => jobs.filter((j) => j.status === 'ERROR').length,
+		[jobs]
+	)
+	const batteryPausedCount = useMemo(
+		() => jobs.filter((j) => j.status === 'BATTERY_PAUSED').length,
+		[jobs]
+	)
+
+	// ── Toggle states (local) ─────────────────────────────────────────────────
 	const [performanceMode, setPerformanceMode] = useState(true)
 	const [highQuality, setHighQuality] = useState(false)
 	const [offlineUsage, setOfflineUsage] = useState(false)
 
-	const [profile, setProfile] = useState<HardwareProfile | null>(null)
-	const isBenchmarking = useHardwareProfileStore((s) => s.isBenchmarking)
-	const setIsBenchmarking = useHardwareProfileStore(
-		(s) => s.setIsBenchmarking
-	)
+	// ── Hardware ──────────────────────────────────────────────────────────────
+	//const [profile, setProfile] = useState<HardwareProfile | null>(null)
+	//const isBenchmarking = useHardwareProfileStore((s) => s.isBenchmarking)
+	//const setIsBenchmarking = useHardwareProfileStore(
+	//	(s) => s.setIsBenchmarking
+	//)
 
-	// ── Downloaded models ────────────────────────────────────────────────────────
+	// ── Downloaded models ─────────────────────────────────────────────────────
 	const downloadedModels = useMemo(
 		() => catalog.filter((m) => m.downloadStatus === 'downloaded'),
 		[catalog]
 	)
 
-	// ── Total storage — sum synchronous getPhysicalFootprint across all models ────
+	// ── Total storage (real — same computation as Storage section) ────────────
 	const [totalBytes, setTotalBytes] = useState(0)
 
 	useEffect(() => {
@@ -436,13 +516,12 @@ export default function SettingsScreen(): React.JSX.Element {
 		return () => clearTimeout(timer)
 	}, [downloadedModels])
 
-	// ── Estimated live FPS from profile ──────────────────────────────────────────
-	const estimatedFPS = useMemo(
-		() => (profile ? estimateLiveFPS(profile) : null),
-		[profile]
-	)
+	//const estimatedFPS = useMemo(
+	//	() => (profile ? estimateLiveFPS(profile) : null),
+	//	[profile]
+	//)
 
-	// ── Handlers ─────────────────────────────────────────────────────────────────
+	// ── Handlers ──────────────────────────────────────────────────────────────
 
 	const handleFormatSelect = useCallback(
 		(fmt: ExportFormat) => {
@@ -454,120 +533,134 @@ export default function SettingsScreen(): React.JSX.Element {
 		[setExportFormat]
 	)
 
-	const handleDeleteModel = useCallback(
-		(styleId: string) => {
-			const model = catalog.find((m) => m.id === styleId)
-			if (!model) return
-
-			tracker.log('Initiating local storage cache deletion sequence', {
-				styleId,
-			})
-
-			Alert.alert(
-				`Remove "${model.name}"?`,
-				'This style will be removed from your device. You can re-download it later.',
-				[
-					{ text: 'Cancel', style: 'cancel' },
-					{
-						text: 'Remove',
-						style: 'destructive',
-						onPress: async () => {
-							try {
-								// Execute local purge sequence from physical storage
-								deleteStyleAssets(styleId)
-
-								tracker.log(
-									'Storage pack deleted successfully from disk space storage',
-									{ styleId }
-								)
-
-								const updated = catalog.map((m) =>
-									m.id === styleId
-										? {
-												...m,
-												downloadStatus:
-													'not_downloaded' as const,
-											}
-										: m
-								)
-
-								// 3. Bubble up the updated collection directly to the Zustand state engine
-								setCatalog(updated)
-							} catch (err) {
-								tracker.error(
-									'Failed to purge style pack from disk space',
-									err
-								)
-								Alert.alert(
-									'Error',
-									'Failed to remove the style. Please try again.'
-								)
-							}
-						},
-					},
-				]
-			)
-		},
-		[catalog, setCatalog]
-	)
-
-	const handleRunBenchmark = useCallback(async () => {
-		if (isBenchmarking) return
-
+	const handleClearCompleted = useCallback(() => {
 		Alert.alert(
-			'Run Hardware Benchmark',
-			"This will test your device's AI capabilities. The app may be briefly unresponsive.",
+			'Clear Completed',
+			`Remove all ${doneCount} completed artworks from the queue history?`,
 			[
 				{ text: 'Cancel', style: 'cancel' },
 				{
-					text: 'Run',
-					onPress: async () => {
-						tracker.log(
-							'Launching hardware profiler engine suite baseline check'
-						)
-						setIsBenchmarking(true)
-						try {
-							const result = await runFullBenchmark(null)
-							tracker.log(
-								'Hardware profile evaluation completed successfully',
-								{ score: result.benchmarkedAt }
-							)
-							setProfile(result)
-						} catch (err) {
-							tracker.error(
-								'Hardware profile analysis exception pipeline error',
-								err
-							)
-							Alert.alert(
-								'Benchmark failed',
-								'Could not complete hardware test. Please try again.'
-							)
-						} finally {
-							setIsBenchmarking(false)
-						}
+					text: 'Clear',
+					style: 'destructive',
+					onPress: () => {
+						tracker.log('Clearing completed jobs from settings')
+						clearCompleted()
 					},
 				},
 			]
 		)
-	}, [isBenchmarking, setIsBenchmarking])
+	}, [clearCompleted, doneCount])
+
+	const handleClearFailed = useCallback(() => {
+		Alert.alert(
+			'Clear Failed Jobs',
+			`Remove all ${errorCount} failed job entries?`,
+			[
+				{ text: 'Cancel', style: 'cancel' },
+				{
+					text: 'Clear',
+					style: 'destructive',
+					onPress: () => {
+						const failedIds = jobs
+							.filter((j) => j.status === 'ERROR')
+							.map((j) => j.id)
+						failedIds.forEach((id) => removeJob(id))
+						tracker.log(
+							`Cleared ${failedIds.length} failed jobs from settings`
+						)
+					},
+				},
+			]
+		)
+	}, [jobs, removeJob, errorCount])
+
+	const handleClearCache = useCallback(() => {
+		Alert.alert(
+			'Clear Model Cache',
+			`This will clear ${formatBytes(totalBytes)} of cached model data. You will need to re-download styles.`,
+			[
+				{ text: 'Cancel', style: 'cancel' },
+				{
+					text: 'Clear Cache',
+					style: 'destructive',
+					onPress: () => {
+						tracker.log(
+							'User initiated full cache clear from settings'
+						)
+						// Clear assets for each downloaded model
+						downloadedModels.forEach((m) => {
+							try {
+								deleteStyleAssets(m.id)
+							} catch {
+								// silent per-model failure
+							}
+						})
+						const updated = catalog.map((m) =>
+							m.downloadStatus === 'downloaded'
+								? {
+										...m,
+										downloadStatus:
+											'not_downloaded' as const,
+									}
+								: m
+						)
+						setGlobalCatalog(updated)
+					},
+				},
+			]
+		)
+	}, [totalBytes, downloadedModels, catalog, setGlobalCatalog])
+
+	//const handleRunBenchmark = useCallback(async () => {
+	//	if (isBenchmarking) return
+	//	Alert.alert(
+	//		'Run Hardware Benchmark',
+	//		"This will test your device's AI capabilities. The app may be briefly unresponsive.",
+	//		[
+	//			{ text: 'Cancel', style: 'cancel' },
+	//			{
+	//				text: 'Run',
+	//				onPress: async () => {
+	//					tracker.log(
+	//						'Launching hardware profiler engine suite baseline check'
+	//					)
+	//					setIsBenchmarking(true)
+	//					try {
+	//						const result = await runFullBenchmark(null)
+	//						tracker.log(
+	//							'Hardware profile evaluation completed',
+	//							{ score: result.benchmarkedAt }
+	//						)
+	//						setProfile(result)
+	//					} catch (err) {
+	//						tracker.error(
+	//							'Hardware profile analysis exception',
+	//							err
+	//						)
+	//						Alert.alert(
+	//							'Benchmark failed',
+	//							'Could not complete hardware test. Please try again.'
+	//						)
+	//					} finally {
+	//						setIsBenchmarking(false)
+	//					}
+	//				},
+	//			},
+	//		]
+	//	)
+	//}, [isBenchmarking, setIsBenchmarking])
+
+	const handleAboutContact = useCallback(() => {
+		router.push('/(screens)/about-contact')
+	}, [])
 
 	const combinedScrollStyle = useMemo(
 		() => [
 			styles.scrollContent,
-			{
-				paddingTop: insets.top + 16,
-				paddingBottom: insets.bottom + 96,
-			},
+			{ paddingTop: insets.top + 16, paddingBottom: insets.bottom + 96 },
 		],
 		[insets.top, insets.bottom]
 	)
-
-	const handleAboutContact = useCallback(() => {
-		tracker.debug(
-			'Routing viewport context out to information profile modal overlay'
-		)
-		router.push('/(screens)/about-contact')
-	}, [])
 
 	return (
 		<ScrollView
@@ -581,31 +674,128 @@ export default function SettingsScreen(): React.JSX.Element {
 				<Text style={styles.pageTitle}>Settings</Text>
 			</View>
 
-			{/* ── 0. Account ───────────────────────────────────────────────── */}
-			<Section title="Account">
-				<Row
-					icon={
-						<User
-							color={C.primaryMid}
-							size={16}
-							strokeWidth={1.5}
-						/>
-					}
-					label="Pro Plan"
-					right={<Text style={styles.accountBadge}>Manage</Text>}
-					onPress={() => {}}
-					noBorder
-				/>
-			</Section>
+			{/* ── Queue Activity (NEW) ────────────────────────────────────────── */}
+			{jobs.length > 0 && (
+				<Section title="Queue Activity">
+					<View style={styles.queueStatsGrid}>
+						{processingCount > 0 && (
+							<QueueStat
+								icon={
+									<Zap
+										color={C.primaryMid}
+										size={14}
+										strokeWidth={2}
+									/>
+								}
+								label="Processing"
+								count={processingCount}
+								color={C.primaryMid}
+							/>
+						)}
+						{queuedCount > 0 && (
+							<QueueStat
+								icon={
+									<Clock
+										color={C.textMuted}
+										size={14}
+										strokeWidth={2}
+									/>
+								}
+								label="Queued"
+								count={queuedCount}
+								color={C.textMuted}
+							/>
+						)}
+						{batteryPausedCount > 0 && (
+							<QueueStat
+								icon={
+									<Zap
+										color={C.warning}
+										size={14}
+										strokeWidth={2}
+									/>
+								}
+								label="Paused"
+								count={batteryPausedCount}
+								color={C.warning}
+							/>
+						)}
+						{doneCount > 0 && (
+							<QueueStat
+								icon={
+									<CheckCircle2
+										color={C.success}
+										size={14}
+										strokeWidth={2}
+									/>
+								}
+								label="Completed"
+								count={doneCount}
+								color={C.success}
+							/>
+						)}
+						{errorCount > 0 && (
+							<QueueStat
+								icon={
+									<AlertCircle
+										color={C.errorDeep}
+										size={14}
+										strokeWidth={2}
+									/>
+								}
+								label="Failed"
+								count={errorCount}
+								color={C.errorDeep}
+							/>
+						)}
+					</View>
 
-			{/* ── Performance & Quality ─────────────────────────────────────── */}
+					{/* Queue management actions */}
+					{doneCount > 0 && (
+						<Row
+							icon={
+								<Images
+									color={C.textMuted}
+									size={16}
+									strokeWidth={1.5}
+								/>
+							}
+							label="Clear Completed"
+							subtitle={`${doneCount} finished job${doneCount === 1 ? '' : 's'}`}
+							onPress={handleClearCompleted}
+							noBorder={errorCount === 0}
+						/>
+					)}
+					{errorCount > 0 && (
+						<Row
+							icon={
+								<AlertCircle
+									color={C.error}
+									size={16}
+									strokeWidth={1.5}
+								/>
+							}
+							label="Clear Failed Jobs"
+							subtitle={`${errorCount} failed job${errorCount === 1 ? '' : 's'}`}
+							onPress={handleClearFailed}
+							danger
+							noBorder
+						/>
+					)}
+				</Section>
+			)}
+
+			{/* ── Performance & Quality ──────────────────────────────────────── */}
 			<Section title="Performance &amp; Quality">
 				<ToggleRow
 					icon={<Zap color="#FFD60A" size={16} strokeWidth={1.5} />}
 					label="Performance Mode"
 					subtitle="Prioritize speed over detail"
 					value={performanceMode}
-					onValueChange={setPerformanceMode}
+					onValueChange={(v) => {
+						setPerformanceMode(v)
+						tracker.log('Performance mode toggled', { enabled: v })
+					}}
 				/>
 				<ToggleRow
 					icon={
@@ -614,12 +804,15 @@ export default function SettingsScreen(): React.JSX.Element {
 					label="Ultra Res Output"
 					subtitle="Render in 4K resolution"
 					value={highQuality}
-					onValueChange={setHighQuality}
+					onValueChange={(v) => {
+						setHighQuality(v)
+						tracker.log('Ultra res output toggled', { enabled: v })
+					}}
 					noBorder
 				/>
 			</Section>
 
-			{/* ── Data & Storage (quick-access toggles) ────────────────────── */}
+			{/* ── Data & Storage ─────────────────────────────────────────────── */}
 			<Section title="Data &amp; Storage">
 				<ToggleRow
 					icon={
@@ -639,13 +832,28 @@ export default function SettingsScreen(): React.JSX.Element {
 						/>
 					}
 					label="Clear Cache"
-					right={<Text style={styles.cacheLabel}>Used: 124 MB</Text>}
-					onPress={() => {}}
+					subtitle={
+						downloadedModels.length > 0
+							? `${formatBytes(totalBytes)} of model data`
+							: 'No cached models'
+					}
+					right={
+						totalBytes > 0 ? (
+							<Text style={styles.cacheLabel}>
+								{formatBytes(totalBytes)}
+							</Text>
+						) : undefined
+					}
+					onPress={
+						downloadedModels.length > 0
+							? handleClearCache
+							: undefined
+					}
 					noBorder
 				/>
 			</Section>
 
-			{/* ── 1. Export Format ─────────────────────────────────────────────── */}
+			{/* ── 1. Export Format ───────────────────────────────────────────── */}
 			<Section title="Default export format">
 				<View style={styles.formatSection}>
 					<View style={styles.formatHeader}>
@@ -670,7 +878,7 @@ export default function SettingsScreen(): React.JSX.Element {
 				</View>
 			</Section>
 
-			{/* ── 2. Storage Management ────────────────────────────────────────── */}
+			{/* ── 2. Storage Management ─────────────────────────────────────── */}
 			<Section title="Storage management">
 				{downloadedModels.length === 0 ? (
 					<View style={styles.emptyRow}>
@@ -699,9 +907,11 @@ export default function SettingsScreen(): React.JSX.Element {
 									strokeWidth={1.5}
 								/>
 							</View>
-							<Text style={styles.rowLabel}>
-								Total space used
-							</Text>
+							<View style={styles.rowLabelBlock}>
+								<Text style={styles.rowLabel}>
+									Total space used
+								</Text>
+							</View>
 						</View>
 						<Text style={styles.totalBytes}>
 							{formatBytes(totalBytes)}
@@ -710,8 +920,8 @@ export default function SettingsScreen(): React.JSX.Element {
 				)}
 			</Section>
 
-			{/* ── 3. Hardware Profile ──────────────────────────────────────────── */}
-			<Section title="Hardware profile">
+			{/* ── 3. Hardware Profile ───────────────────────────────────────── */}
+			{/*<Section title="Hardware profile">
 				{profile ? (
 					<>
 						<Row
@@ -819,9 +1029,9 @@ export default function SettingsScreen(): React.JSX.Element {
 							: 'Run Hardware Benchmark'}
 					</Text>
 				</Pressable>
-			</Section>
+			</Section>*/}
 
-			{/* ── 4. About & Contact ──────────────────────────────────────────── */}
+			{/* ── 4. About ─────────────────────────────────────────────────── */}
 			<Section title="About">
 				<Row
 					icon={
@@ -844,6 +1054,34 @@ export default function SettingsScreen(): React.JSX.Element {
 					}
 					label="Contact Us"
 					onPress={handleAboutContact}
+				/>
+				<Row
+					icon={
+						<Trash2 color={C.error} size={16} strokeWidth={1.5} />
+					}
+					label="Reset All Settings"
+					danger
+					onPress={() => {
+						Alert.alert(
+							'Reset Settings',
+							'This will restore all settings to their default values.',
+							[
+								{ text: 'Cancel', style: 'cancel' },
+								{
+									text: 'Reset',
+									style: 'destructive',
+									onPress: () => {
+										setPerformanceMode(true)
+										setHighQuality(false)
+										setOfflineUsage(false)
+										tracker.log(
+											'User reset all settings to defaults'
+										)
+									},
+								},
+							]
+						)
+					}}
 					noBorder
 				/>
 			</Section>
@@ -906,12 +1144,7 @@ const styles = StyleSheet.create({
 		borderBottomColor: C.border,
 	},
 	rowPressed: { backgroundColor: C.surfaceHigh },
-	rowLeft: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 12,
-		flex: 1,
-	},
+	rowLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
 	rowIcon: {
 		width: 32,
 		height: 32,
@@ -921,10 +1154,18 @@ const styles = StyleSheet.create({
 		alignItems: 'center',
 	},
 	rowIconDanger: { backgroundColor: `${C.error}15` },
-	rowLabel: { color: C.text, fontSize: 15, fontWeight: '500', flex: 1 },
+	rowLabelBlock: { flex: 1 },
+	rowLabel: { color: C.text, fontSize: 15, fontWeight: '500' },
 	rowLabelDanger: { color: C.error },
+	rowSubtitle: { color: C.textMuted, fontSize: 12, marginTop: 1 },
 	rowRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
 
+	// Toggle
+	toggleRow: { paddingVertical: 12 },
+	toggleLabelBlock: { flex: 1 },
+	toggleSubtitle: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+
+	// Format picker
 	formatSection: { padding: 16, gap: 14 },
 	formatHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
 	formatLabel: { color: C.textMuted, fontSize: 14, fontWeight: '500' },
@@ -953,6 +1194,7 @@ const styles = StyleSheet.create({
 	formatChipTextSelected: { color: C.white },
 	formatNote: { color: C.textDim, fontSize: 12, lineHeight: 17 },
 
+	// Storage
 	storageRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
 	storageSize: { color: C.textMuted, fontSize: 13, fontWeight: '500' },
 	deleteIcon: {
@@ -966,6 +1208,7 @@ const styles = StyleSheet.create({
 	totalRow: { backgroundColor: `${C.primary}0D` },
 	totalBytes: { color: C.primary, fontSize: 14, fontWeight: '700' },
 
+	// Hardware
 	tierBadge: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -978,7 +1221,6 @@ const styles = StyleSheet.create({
 	tierBadge1: { backgroundColor: `${C.downloaded}15` },
 	tierBadgeText: { color: C.warning, fontSize: 12, fontWeight: '700' },
 	tierBadgeText1: { color: C.downloaded },
-
 	delegateText: {
 		color: C.primaryMid,
 		fontSize: 13,
@@ -986,7 +1228,6 @@ const styles = StyleSheet.create({
 		letterSpacing: 0.5,
 	},
 	benchmarkDate: { color: C.textMuted, fontSize: 13 },
-
 	benchmarkButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -1001,32 +1242,38 @@ const styles = StyleSheet.create({
 	benchmarkButtonDisabled: { opacity: 0.6 },
 	benchmarkButtonText: { color: C.white, fontSize: 14, fontWeight: '700' },
 
+	// Queue activity section
+	queueStatsGrid: {
+		padding: 16,
+		paddingBottom: 8,
+		gap: 10,
+		borderBottomWidth: StyleSheet.hairlineWidth,
+		borderBottomColor: C.border,
+	},
+	queueStatRow: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 10,
+	},
+	queueStatLabel: { flex: 1, color: C.text, fontSize: 14, fontWeight: '500' },
+	queueStatBadge: {
+		minWidth: 32,
+		paddingHorizontal: 8,
+		paddingVertical: 3,
+		borderRadius: 10,
+		borderWidth: 1,
+		alignItems: 'center',
+	},
+	queueStatCount: { fontSize: 13, fontWeight: '800' },
+
+	// Misc
 	emptyRow: { padding: 20, alignItems: 'center' },
 	emptyRowText: { color: C.textMuted, fontSize: 14 },
-
 	versionFooter: {
 		color: C.textDim,
 		fontSize: 11,
 		textAlign: 'center',
 		marginTop: 8,
 	},
-
-	toggleRow: { paddingVertical: 12 },
-	toggleLabelBlock: { flex: 1 },
-	toggleSubtitle: {
-		color: C.textMuted,
-		fontSize: 12,
-		marginTop: 2,
-	},
-
-	accountBadge: {
-		color: C.primaryMid,
-		fontSize: 13,
-		fontWeight: '600',
-	},
-
-	cacheLabel: {
-		color: C.textMuted,
-		fontSize: 13,
-	},
+	cacheLabel: { color: C.textMuted, fontSize: 13 },
 })

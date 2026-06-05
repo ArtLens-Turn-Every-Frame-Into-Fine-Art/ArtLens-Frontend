@@ -29,7 +29,6 @@ import {
 	ActivityIndicator,
 	Alert,
 	Dimensions,
-	FlatList,
 	Modal,
 	Platform,
 	Pressable,
@@ -41,13 +40,11 @@ import {
 	TextInput,
 	TouchableOpacity,
 	View,
-	type ListRenderItem,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import {
 	Check,
-	ChevronLeft,
 	Download,
 	Eye,
 	HardDrive,
@@ -73,7 +70,7 @@ import {
 import type { StyleModel } from '@/types'
 
 import { createTracker } from '@/shared/utils/logger'
-import { COLORS } from '@/shared/utils/constants'
+import { COLORS, DEFAULT_MODEL_CONFIG } from '@/shared/utils/constants'
 
 // Initialize namespaced module logger at module scope
 const tracker = createTracker('StylesScreen')
@@ -492,7 +489,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					downloadStatus: 'downloading',
 					previewPath: null,
 					mainPath: null,
-					config: { mainModel: 0, previewModel: 0 },
+					config: { ...DEFAULT_MODEL_CONFIG, ...model.config },
 					previewSize: 0,
 					mainSize: 0,
 				})
@@ -507,7 +504,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					previewModelUrl: model.previewModelUrl,
 					mainModelUrl: model.mainModelUrl,
 					isActive: true,
-					config: model.config ?? undefined,
+					config: model.config,
 				})
 
 				updateDownloadStatus(styleId, 'downloaded')
@@ -589,19 +586,19 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 		router.replace('/(tabs)/gallery')
 	}, [sourceUri, selectedStyle, enqueueJob, router])
 
-	const renderCard: ListRenderItem<StyleModel> = useCallback(
-		({ item }) => (
-			<StyleGridCard
-				item={item}
-				isSelected={selectedStyleId === item.id}
-				onSelect={handleSelectStyle}
-				onDownload={handleDownload}
-			/>
-		),
-		[selectedStyleId, handleSelectStyle, handleDownload]
-	)
+	//const renderCard: ListRenderItem<StyleModel> = useCallback(
+	//	({ item }) => (
+	//		<StyleGridCard
+	//			item={item}
+	//			isSelected={selectedStyleId === item.id}
+	//			onSelect={handleSelectStyle}
+	//			onDownload={handleDownload}
+	//		/>
+	//	),
+	//	[selectedStyleId, handleSelectStyle, handleDownload]
+	//)
 
-	const keyExtractor = useCallback((item: StyleModel) => item.id, [])
+	//const keyExtractor = useCallback((item: StyleModel) => item.id, [])
 
 	return (
 		<View style={styles.container}>
@@ -614,15 +611,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					{ paddingTop: insets.top > 0 ? insets.top : 16 },
 				]}
 			>
-				<TouchableOpacity
-					style={styles.backButton}
-					onPress={() => router.back()}
-					hitSlop={12}
-				>
-					<ChevronLeft color={COLORS.textMain} size={24} />
-				</TouchableOpacity>
 				<Text style={styles.headerTitle}>Style Explorer</Text>
-				<View style={styles.headerRightPlaceholder} />
 			</View>
 
 			<ScrollView
@@ -801,22 +790,19 @@ const styles = StyleSheet.create({
 	header: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		justifyContent: 'space-between',
+		justifyContent: 'center',
 		paddingHorizontal: H_PADDING,
 		paddingBottom: 12,
 		borderBottomWidth: 1,
 		borderBottomColor: COLORS.border,
 		backgroundColor: '#FFFFFF',
 	},
-	backButton: {
-		width: 40,
-		height: 40,
-		borderRadius: 20,
-		backgroundColor: COLORS.border,
-		alignItems: 'center',
-		justifyContent: 'center',
+	headerTitle: {
+		fontSize: 17,
+		fontWeight: '700',
+		color: COLORS.textMain,
+		top: 4,
 	},
-	headerTitle: { fontSize: 17, fontWeight: '700', color: COLORS.textMain },
 	headerRightPlaceholder: { width: 40 },
 
 	// ── Scroll ─────────────────────────────────────────────────────────────────

@@ -16,18 +16,27 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 	const { resolvedSharedPayloads, isResolving } = useIncomingShare()
 
 	useEffect(() => {
-		// Wait until native platform finishes extracting/caching the file
+		// 1. Wait until native platform finishes extracting/caching the file completely
 		if (isResolving) return
+
+		// 2. STAGE 1 SAFEGUARD: Android frequently triggers an initial empty payload pass
+		// while warm-starting the app cache. If it's undefined or completely empty, wait for the next tick.
+		if (!resolvedSharedPayloads || resolvedSharedPayloads.length === 0) {
+			tracker.log(
+				'Share payload array is empty, waiting for native cache resolution...'
+			)
+			return
+		}
 
 		tracker.log(
 			'Native share intent payloads resolved from background cache',
 			{
-				payloadCount: resolvedSharedPayloads?.length,
+				payloadCount: resolvedSharedPayloads.length,
 			}
 		)
 
 		// Look for the first shared item matching an image or file asset type
-		const imagePayload = resolvedSharedPayloads?.find(
+		const imagePayload = resolvedSharedPayloads.find(
 			(payload) =>
 				payload.contentType === 'image' ||
 				payload.contentType === 'file'
@@ -41,16 +50,21 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 				}
 			)
 
-			// Forward the native cache content path seamlessly to your style tab view
+			// 3. Safely URL encode the local file path string so slashes don't break Expo Router segments
+			const encodedUri = encodeURIComponent(imagePayload.contentUri)
+
+			// 4. Route explicitly to the screen.
+			// NOTE: In Expo Router, you must route via the group folder layout it sits in,
+			// which is likely '/(screens)/StyleSelectionScreen' based on your layout configuration.
 			router.replace({
-				pathname: '/StyleSelectionScreen',
-				params: { externalUri: imagePayload.contentUri },
+				pathname: '/(screens)/StyleSelectionScreen',
+				params: { sourceUri: encodedUri },
 			})
 		} else {
 			tracker.warn(
 				'Sharing link invoked but no valid image target asset payload was found'
 			)
-			router.replace('/')
+			router.replace('/(tabs)/home')
 		}
 	}, [resolvedSharedPayloads, isResolving])
 
@@ -65,13 +79,13 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 const styles = StyleSheet.create({
 	container: {
 		flex: 1,
-		backgroundColor: '#F8F9FB', // Light gray background
+		backgroundColor: '#F8F9FB',
 		justifyContent: 'center',
 		alignItems: 'center',
 		gap: 16,
 	},
 	text: {
-		color: '#1C1C1E', // Dark charcoal text for readability
+		color: '#1C1C1E',
 		fontSize: 16,
 		fontWeight: '600',
 	},

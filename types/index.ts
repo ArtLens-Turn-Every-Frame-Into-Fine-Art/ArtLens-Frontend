@@ -1,74 +1,156 @@
 /**
- * ArtLens — Global TypeScript Type Definitions
+ * 🎨 ArtLens — Global TypeScript Type Definitions
  *
  * All shared interfaces, enums, and utility types for the entire application.
  * Screens, stores, services, and core modules import from this file.
  *
- * PRD § 5 — Directory: src/types/index.ts
+ * @see PRD § 5 — Directory: src/types/index.ts
  */
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PRIMITIVES
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 1. PRIMITIVES & ALIASES
+// ============================================================================
 
 export type StyleId = string
 export type JobId = string
 export type ClientHash = string
-export type Config = {
-	mainModel: number
-	previewModel?: number
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STYLE MODEL
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 2. STYLE MODEL & DOMAIN CONFIG
+// ============================================================================
 
 /** Download state of a style pack (Preview + Main .tflite pair). */
 export type DownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded'
+
+/**
+ * Extended download status used exclusively inside the MMKV model registry.
+ * `'failed'` is a registry-internal state that is never written to Zustand.
+ * When a download fails, the registry stores `'failed'` but the store is
+ * reset to `'not_downloaded'` so UI components only see the public union.
+ */
+export type RegistryDownloadStatus = DownloadStatus | 'failed'
+
+/** Supported colour processing modes for the style transfer pipeline. */
+export type ColourMode = 'texture_only' | 'full_colour' | 'luminance_blend'
+
+/**
+ * The partial model configuration as received from the API manifest.
+ * Only `mainModel` and `previewModel` are served by the backend.
+ * All other ModelConfig fields are engine-local constants that are NEVER
+ * served by the API and must always be filled from DEFAULT_MODEL_CONFIG.
+ *
+ * @see ModelConfig — the fully-hydrated engine-ready shape
+ * @see hydrateRemoteConfig — the merge function that produces ModelConfig
+ */
+export interface RemoteModelConfig {
+	/** Input resolution for the main (teacher) model inference pass. */
+	mainModel: number
+	/**
+	 * Input resolution for the preview (student) model inference pass.
+	 * Optional — falls back to DEFAULT_MODEL_CONFIG.previewModel when absent.
+	 */
+	previewModel?: number
+}
 
 /**
  * A single art style entry in the catalog.
  * Mirrors the ManifestUpdate shape plus local download tracking.
  */
 export interface StyleModel {
-	/** Unique identifier — stable across versions */
-	id: StyleId
-	/** Display name shown in carousels and selection grids */
+	id: string
 	name: string
-	/** Long-form description shown in ModelDetailSheet */
-	description: string
-	/** Manifest version — used for delta update comparison */
+	description?: string
 	version: number
-	/** Remote URL for the thumbnail image */
-	thumbnailUrl: string
-	/** Human-readable estimated file size (e.g. "~45 MB") from manifest */
-	fileSize: string
-	/** Whether this model is visible in the active catalog */
-	isActive: boolean
-	/** URL to download the Preview (live preview) .tflite model */
-	previewModelUrl: string
-	/** URL to download the Main (full quality) .tflite model */
 	mainModelUrl: string
-	/** URL to a JSON file with per-model inference config (overlap, colour mode, etc.) */
-	config: Config
+	previewModelUrl?: string
+	thumbnailUrl: string
+	fileSize?: string
+	isActive: boolean
+	config: ModelConfig
 	/** Local download state */
 	downloadStatus: DownloadStatus
 	/** Download progress [0, 1] — only meaningful when status === 'downloading' */
 	downloadProgress: number
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STYLE JOB
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * The fully hydrated, engine-ready model configuration.
+ *
+ * This type is produced by hydrateRemoteConfig() and is NEVER constructed
+ * directly from the raw API RemoteModelConfig. All fields are readonly to
+ * prevent accidental compile-time resolution locking via in-place mutation.
+ *
+ * Fields not served by the API (tileOverlap, luminanceBlend, colourModes)
+ * are always backfilled from DEFAULT_MODEL_CONFIG.
+ */
+export interface ModelConfig {
+	/**
+	 * Input resolution for the main model inference pass.
+	 * @source RemoteModelConfig.mainModel
+	 */
+	mainModel: number
+	/**
+	 * Input resolution for the preview model inference pass.
+	 * @source RemoteModelConfig.previewModel ?? DEFAULT_MODEL_CONFIG.previewModel
+	 */
+	previewModel: number
+	/**
+	 * Pixel overlap between adjacent tiles to prevent visible seam artefacts.
+	 * @source DEFAULT_MODEL_CONFIG (not served by API)
+	 */
+	tileOverlap: number
+	/**
+	 * Luminance blending coefficient in range [0.0, 1.0].
+	 * @source DEFAULT_MODEL_CONFIG (not served by API)
+	 */
+	luminanceBlend: number
+	/** Default colour processing mode applied on first use. */
+	defaultColourMode: ColourMode
+	/** User's current preferred colour mode (may differ from default). */
+	preferredColourMode: ColourMode
+}
+
+/** URL pair used by ModelManager.downloadStylePack(). */
+export interface ModelUrls {
+	previewModelUrl: string
+	mainModelUrl: string
+}
+
+/**
+ * On-disk registry entry persisted to MMKV by ModelManager.
+ * Tracks the fully-hydrated config, file paths, and download lifecycle state.
+ *
+ * `downloadStatus` uses RegistryDownloadStatus (superset of DownloadStatus)
+ * so that `'failed'` can be tracked in the registry without polluting the
+ * Zustand store's public DownloadStatus contract.
+ */
+export interface ModelRegistryEntry {
+	id: StyleId
+	name: string
+	version: number
+	downloadStatus: RegistryDownloadStatus
+	previewPath: string | null
+	mainPath: string | null
+	/** Fully hydrated ModelConfig — never the raw RemoteModelConfig. */
+	config: ModelConfig
+	previewSize: number
+	mainSize: number
+}
+
+// ============================================================================
+// 3. BACKGROUND STYLE JOBS & PIPELINE
+// ============================================================================
 
 /**
  * All possible lifecycle states for a background stylization job.
  *
+ * ```text
  * Transitions:
- *   QUEUED → PROCESSING → DONE
- *   QUEUED | PROCESSING → BATTERY_PAUSED  (battery ≤ 5% or power-saver)
- *   PROCESSING → ERROR
- *   ERROR → QUEUED (via retryJob)
+ * QUEUED → PROCESSING → DONE
+ * QUEUED | PROCESSING → BATTERY_PAUSED  (battery ≤ 5% or power-saver)
+ * PROCESSING → ERROR
+ * ERROR → QUEUED (via retryJob)
+ * ```
  */
 export type JobStatus =
 	| 'QUEUED'
@@ -76,6 +158,7 @@ export type JobStatus =
 	| 'DONE'
 	| 'ERROR'
 	| 'BATTERY_PAUSED'
+	| 'PREVIEW_QUEUED'
 
 /** A single background stylization job. */
 export interface StyleJob {
@@ -105,7 +188,6 @@ export interface StyleJob {
 	/**
 	 * Deep-freeze checkpoint path.
 	 * Set when a PROCESSING job is paused due to low battery.
-	 * Allows resumption from the last completed tile.
 	 */
 	checkpointPath?: string
 }
@@ -116,11 +198,12 @@ export interface JobPayload {
 	sourceUri: string
 	/** ID of the style to apply */
 	styleId: StyleId
+	isPreview?: boolean
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DEEP FREEZE CHECKPOINT (PRD § StyleJobService — Tiling checkpoint fields)
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 4. DEEP FREEZE CHECKPOINTS (Tiling pipeline)
+// ============================================================================
 
 export interface TileGridDef {
 	cols: number
@@ -145,18 +228,19 @@ export interface TileCheckpoint {
 	partialBitmapB64: string
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HARDWARE PROFILE  (PRD § HardwareProfiler.ts)
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 5. HARDWARE & INFERENCE ENGINE ARCHITECTURE
+// ============================================================================
 
 export type DelegateType = 'nnapi' | 'android-gpu' | 'core-ml'
+export type ModelSlot = 'preview' | 'main'
+export type TensorShape = [number, number, number, number]
 
 /**
  * Result of a full hardware benchmark run.
- * Determines how InferenceEngine routes models to delegates.
  *
- * Tier 1 → Live camera loop capable (NPU/GPU available, benchmark ≥ 10 FPS).
- * Tier 2 → Static-only mode; live preview disabled, queue-based only.
+ * - **Tier 1:** Live camera loop capable (NPU/GPU available, benchmark ≥ 10 FPS).
+ * - **Tier 2:** Static-only mode; live preview disabled, queue-based only.
  */
 export interface HardwareProfile {
 	tier: 1 | 2
@@ -168,57 +252,49 @@ export interface HardwareProfile {
 	benchmarkedAt: number
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MODEL & INFERENCE CONFIG
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 6. SYSTEM OS INTEGRATION (Battery & Intent Handlers)
+// ============================================================================
 
-/** URL pair used by ModelManager.downloadStylePack(). */
-export interface ModelUrls {
-	previewModelUrl: string
-	mainModelUrl: string
+export interface BatteryState {
+	batteryLevel: number // [0, 100] percentage
+	isPowerSaverActive: boolean
+	isProcessingFrozen: boolean
 }
 
-/** Parsed contents of a style's config.json fetched from config. */
-export interface ModelConfig {
-	/** Tile overlap fraction [0, 1]. Default 0.5 per PRD. */
-	tileOverlap: number
-	/** 'texture_only' | 'lab_match' | 'none' — post-processing colour mode. */
-	preferredColourMode: 'texture_only' | 'lab_match' | 'none'
-	/** Main model tile resolution. */
-	inferenceResolution: number
-	/** Preview model tile resolution. Always 256 per PRD. */
-	previewResolution: number
-
-	luminanceBlend: number
-	defaultColourMode: 'texture_only' | 'lab_match' | 'none'
+/** Populated by useIncomingImage when the app is opened via share or deep link. */
+export interface IncomingImageState {
+	uri: string | null
+	filename: string | null
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SETTINGS / EXPORT
-// ─────────────────────────────────────────────────────────────────────────────
 
 /** User-selected format for saved artwork files. Stored in useModelStore. */
 export type ExportFormat = 'JPEG' | 'JPG' | 'PNG' | 'HEIC' | 'HEIF'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// API — MANIFEST SYNC  (PRD § 8.1)
-// ─────────────────────────────────────────────────────────────────────────────
+// ============================================================================
+// 7. API & NETWORK SYNC (PRD § 8.1 & api.ts)
+// ============================================================================
 
 /**
  * Single model entry within a manifest 200 response.
- * Structural subset of StyleModel — no local fields (downloadStatus etc.).
+ *
+ * `config` is typed as RemoteModelConfig — only mainModel and previewModel
+ * are served by the API. Engine-only fields must be merged from
+ * DEFAULT_MODEL_CONFIG via hydrateRemoteConfig() before use.
  */
 export interface ManifestUpdate {
 	id: StyleId
 	name: string
-	description: string
+	description?: string
 	version: number
-	thumbnailUrl: string
-	fileSize: string
-	isActive: boolean
-	previewModelUrl: string
 	mainModelUrl: string
-	config: Config
+	/** Optional — not all styles include a preview (student) model. */
+	previewModelUrl?: string
+	thumbnailUrl: string
+	fileSize?: string
+	isActive: boolean
+	/** Partial API config — hydrate via hydrateRemoteConfig() before use. */
+	config: RemoteModelConfig
 }
 
 /** Full body of a successful POST /api/models-manifest 200 response. */
@@ -237,42 +313,8 @@ export type SyncResult = {
 	deleted: StyleId[]
 } | null
 
-// ─────────────────────────────────────────────────────────────────────────────
-// API — CONTACT FORM  (PRD § api.ts)
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface ContactPayload {
 	name: string
 	email: string
 	message: string
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// INCOMING IMAGE (Share Intent / Deep Link)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Populated by useIncomingImage when the app is opened via share or deep link. */
-export interface IncomingImageState {
-	uri: string | null
-	filename: string | null
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// INFERENCE ENGINE INTERFACES  (PRD § InferenceEngine.ts)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** The two isolated model slots managed by InferenceEngine. */
-export type ModelSlot = 'preview' | 'main'
-
-/** Input tensor shape for inference — [batch, height, width, channels]. */
-export type TensorShape = [number, number, number, number]
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BATTERY  (PRD § useBatteryGuard.ts)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface BatteryState {
-	batteryLevel: number // [0, 100] percentage
-	isPowerSaverActive: boolean
-	isProcessingFrozen: boolean
 }

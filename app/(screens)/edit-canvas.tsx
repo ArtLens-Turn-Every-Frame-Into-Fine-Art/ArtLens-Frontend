@@ -91,20 +91,20 @@ const tracker = createTracker('edit_canvas')
 
 // — Design tokens —————————————————————————————————————————————————————————————
 const C = {
-	bg: '#080810',
-	surface: '#10101C',
-	surfaceHigh: '#181828',
-	border: '#1E1E30',
-	primary: '#6D28D9',
-	primaryMid: '#7C3AED',
-	accent: '#C026D3',
-	text: '#F4F4FF',
-	textMuted: '#7070A0',
-	textDim: '#40405A',
-	success: '#059669',
-	downloaded: '#10B981',
-	warning: '#D97706',
-	error: '#DC2626',
+	bg: '#F8F9FB',
+	surface: '#FFFFFF',
+	surfaceHigh: '#F2F2F7',
+	border: '#E5E5EA',
+	primary: '#7B61FF',
+	primaryMid: '#7B61FF',
+	accent: '#FF7675',
+	text: '#1C1C1E',
+	textMuted: '#8E8E93',
+	textDim: '#AEAEB2',
+	success: '#34C759',
+	downloaded: '#4CD964',
+	warning: '#FF9F0A',
+	error: '#FF7675',
 	white: '#FFFFFF',
 } as const
 
@@ -1165,7 +1165,7 @@ const styles = StyleSheet.create({
 		justifyContent: 'center',
 		alignItems: 'center',
 		gap: 14,
-		backgroundColor: '#050508',
+		backgroundColor: C.bg,
 	},
 	brushLoadingText: {
 		color: C.textMuted,
@@ -1179,12 +1179,12 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		alignItems: 'center',
 		gap: 6,
-		backgroundColor: 'rgba(8,8,16,0.72)',
+		backgroundColor: 'rgba(0,0,0,0.55)',
 		borderRadius: 20,
 		paddingHorizontal: 14,
 		paddingVertical: 7,
 		borderWidth: StyleSheet.hairlineWidth,
-		borderColor: 'rgba(255,255,255,0.12)',
+		borderColor: 'rgba(0,0,0,0.15)',
 	},
 	brushHintText: {
 		color: 'rgba(255,255,255,0.7)',
@@ -1203,7 +1203,7 @@ const styles = StyleSheet.create({
 	},
 	statusCard: {
 		width: '100%',
-		backgroundColor: 'rgba(10,10,20,0.92)',
+		backgroundColor: 'rgba(255,255,255,0.96)',
 		borderRadius: 20,
 		borderWidth: 1,
 		borderColor: C.border,
@@ -1249,7 +1249,7 @@ const styles = StyleSheet.create({
 	// ── Processing HUD ────────────────────────────────────────────────────────
 	processingHud: {
 		width: '100%',
-		backgroundColor: 'rgba(10,10,20,0.88)',
+		backgroundColor: 'rgba(255,255,255,0.94)',
 		borderRadius: 16,
 		borderWidth: 1,
 		borderColor: C.border,

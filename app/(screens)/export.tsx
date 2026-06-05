@@ -38,7 +38,6 @@ import {
 	ScrollView,
 	StyleSheet,
 	Text,
-	TouchableOpacity,
 	View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -104,26 +103,26 @@ interface QualityDef {
 	estimate: string
 }
 
-const QUALITY_OPTIONS: QualityDef[] = [
-	{
-		id: 'standard',
-		label: 'Standard',
-		sub: 'Fastest export, great for DMs',
-		estimate: '2.4 MB',
-	},
-	{
-		id: 'high',
-		label: 'High Definition',
-		sub: 'Optimized for Social Media',
-		estimate: '5.8 MB',
-	},
-	{
-		id: 'ultra',
-		label: 'Ultra 4K',
-		sub: 'Lossless — best for printing',
-		estimate: '14.2 MB',
-	},
-]
+//const QUALITY_OPTIONS: QualityDef[] = [
+//	{
+//		id: 'standard',
+//		label: 'Standard',
+//		sub: 'Fastest export, great for DMs',
+//		estimate: '2.4 MB',
+//	},
+//	{
+//		id: 'high',
+//		label: 'High Definition',
+//		sub: 'Optimized for Social Media',
+//		estimate: '5.8 MB',
+//	},
+//	{
+//		id: 'ultra',
+//		label: 'Ultra 4K',
+//		sub: 'Lossless — best for printing',
+//		estimate: '14.2 MB',
+//	},
+//]
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SOCIAL SHARE TARGETS
@@ -218,11 +217,11 @@ function openAppSettings(): void {
 // SPARKLES DECORATOR — restored from old UI
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SparklesIcon = ({ color, size }: { color: string; size: number }) => (
-	<View style={{ marginLeft: 6 }}>
-		<Text style={{ color, fontSize: size }}>✦</Text>
-	</View>
-)
+//const SparklesIcon = ({ color, size }: { color: string; size: number }) => (
+//	<View style={{ marginLeft: 6 }}>
+//		<Text style={{ color, fontSize: size }}>✦</Text>
+//	</View>
+//)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SOCIAL CARD — old-style 4-column icon card (memoized)
@@ -397,8 +396,16 @@ export default function ExportScreen(): React.JSX.Element {
 		}
 		if (isSaving || isSaved) return
 
-		setIsSaving(true)
+		if (!job) {
+			tracker.warn(
+				'Aborting save chain: job target context is undefined or null'
+			)
+			return
+		}
+
 		try {
+			setIsSaving(true)
+			tracker.log('Executing production local storage copy chain')
 			const { status, canAskAgain } =
 				await MediaLibrary.getPermissionsAsync()
 
@@ -439,7 +446,9 @@ export default function ExportScreen(): React.JSX.Element {
 
 			const sourceFile = new File(outputUri)
 			const destFile = new File(Paths.cache, filename)
-			await sourceFile.copy(destFile)
+			sourceFile.copy(destFile)
+
+			useStyleJobStore.getState().updateJobOutputUri(job.id, destFile.uri)
 
 			const asset = await MediaLibrary.createAssetAsync(destFile.uri)
 
@@ -551,6 +560,7 @@ export default function ExportScreen(): React.JSX.Element {
 		quality,
 		styleName,
 		updateJob,
+		job,
 	])
 
 	// ── Share (unchanged) ─────────────────────────────────────────────────────
@@ -725,7 +735,7 @@ export default function ExportScreen(): React.JSX.Element {
 				</View>
 
 				{/* ── Quality section header with SparklesIcon ──────────────── */}
-				<View style={styles.sectionHeaderRow}>
+				{/*<View style={styles.sectionHeaderRow}>
 					<Text style={styles.sectionLabel}>SELECT QUALITY</Text>
 					<SparklesIcon color={PRIMARY_PURPLE} size={14} />
 				</View>
@@ -737,7 +747,7 @@ export default function ExportScreen(): React.JSX.Element {
 						selected={quality === opt.id}
 						onSelect={setQuality}
 					/>
-				))}
+				))}*/}
 
 				{/* ── Social share grid — old 4-column layout ───────────────── */}
 				<Text

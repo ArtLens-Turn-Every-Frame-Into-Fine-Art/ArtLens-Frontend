@@ -217,7 +217,6 @@ const styles = StyleSheet.create({
 	tabLabel: {
 		fontSize: 10,
 		fontWeight: '500',
-		marginTop: 2,
 		letterSpacing: 0.2,
 	},
 	createPill: {

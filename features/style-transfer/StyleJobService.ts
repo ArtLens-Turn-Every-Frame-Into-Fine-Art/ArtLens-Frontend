@@ -1,69 +1,84 @@
 /**
- * ArtLens — StyleJobService (v4 — float32 model integration)
+ * ArtLens — StyleJobService (v5 — resolution-agnostic model config hydration)
  *
  * Module-level singleton driving the background stylization queue.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * CHANGES vs v3 (float32 model integration)
+ * CHANGES vs v4 (resolution-agnostic refactor)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  FIX 9 — Stale fp16 pipeline comments updated to reflect float32 reality.
- *    The v3 comment block in processNextJobInQueue still referenced "fp16" for
- *    the mainInputBuffer and tile output types. Both teacher and student models
- *    are float32 I/O. Comments now correctly describe the float32 pipeline and
- *    the CUT normalization: (pixel/127.5) − 1.0 → [-1, 1].
+ *  FIX 11 — Mandate 1: Dynamic config hydration before any model slot load.
+ *    getModelConfig(job.styleId) is now awaited inside the inner try block,
+ *    before loadMainModel or loadPreviewModel is called. The resolved config
+ *    object is passed as the second argument to both loaders, storing it on
+ *    the hardware slot so TiledInferenceRunner can retrieve live resolution
+ *    via getActiveModelConfig() without a secondary manifest round-trip.
  *
- *  FIX 10 — Preview job support added (student model, 256×256 slot).
- *    StyleJobService now distinguishes PREVIEW_QUEUED jobs from QUEUED jobs.
- *    A PREVIEW_QUEUED job loads the student model into the 'preview' slot and
- *    calls runPreviewInference() instead of runTiledInference().
- *    Main and preview jobs are mutually exclusive via _processingLock — only
- *    one forward-pass pipeline can run at a time.
+ *  FIX 12 — Mandate 2: Complete resolution blindness.
+ *    All hardcoded resolution literals eliminated. Every log message, tracker
+ *    metric, and error string that references a tile dimension now reads from
+ *    config.mainModel (main path) or config.previewModel (preview path).
  *
- *    Teacher (main):
- *      loadMainModel  → unload preview → runTiledInference   (512×512, float32)
- *    Student (preview):
- *      loadPreviewModel → runPreviewInference              (256×256, float32)
+ *  FIX 13 — Mandate 3 / BatteryGuardError parity.
+ *    BatteryGuardError thrown by loadMainModel is now caught and handled
+ *    identically to InferenceAbortError — job transitions to BATTERY_PAUSED.
+ *    Both error types fall through to the inner finally without duplicating
+ *    unloadModel or _currentJobId cleanup.
+ *
+ *  FIX 14 — Mandate 3 / nextPreviewJob routing bug.
+ *    nextPreviewJob was incorrectly sourced from status === 'BATTERY_PAUSED',
+ *    causing paused main-inference jobs to be picked up and run through the
+ *    preview (student) slot. Corrected to status === 'PREVIEW_QUEUED'.
+ *    isPreviewJob guard updated accordingly.
+ *
+ *  FIX 15 — Mandate 3 / outer finally queue continuation.
+ *    Outer finally now schedules processNextJobInQueue() via setTimeout(0)
+ *    after releasing _processingLock, keeping the queue draining fluidly
+ *    without relying on external callers to re-trigger processing.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * PRESERVED CHANGES FROM v3
+ * PRESERVED CHANGES FROM v4
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  FIX 1 — loadMainModel API contract mismatch (was runtime TypeError).
- *  FIX 2 — unloadModel is synchronous — all call-sites correct as-is.
- *  FIX 3 — _processingLock set synchronously before the first await.
- *  FIX 4 — abort path memory leak (model unloaded before ID cleared).
- *  FIX 5 — cancelJob delegates to removeJob() — not ERROR status.
- *  FIX 6 — runTiledInference replaces simulated setTimeout loop.
- *  FIX 7 — InferenceAbortError caught specifically → BATTERY_PAUSED.
- *  FIX 8 — onProgress guards _currentJobId before writing progress.
+ *  FIX 1  — loadMainModel API contract mismatch (was runtime TypeError).
+ *  FIX 2  — unloadModel is synchronous — all call-sites correct as-is.
+ *  FIX 3  — _processingLock set synchronously before the first await.
+ *  FIX 4  — abort path memory leak (model unloaded before ID cleared).
+ *  FIX 5  — cancelJob delegates to removeJob() — not ERROR status.
+ *  FIX 6  — runTiledInference replaces simulated setTimeout loop.
+ *  FIX 7  — InferenceAbortError caught specifically → BATTERY_PAUSED.
+ *  FIX 8  — onProgress guards _currentJobId before writing progress.
+ *  FIX 9  — Stale fp16 pipeline comments updated to reflect float32 reality.
+ *  FIX 10 — Preview job support added (student model, dynamic preview-res slot).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * PIPELINE LIFECYCLE (inner try block — main job)
  * ─────────────────────────────────────────────────────────────────────────────
  *
+ *  0. getModelConfig(styleId)          — hydrate live config (await; before any load)
  *  1. unloadModel('preview')           — free live-preview GPU slot
- *  2. loadMainModel(modelPath)         — load teacher .tflite (may throw BatteryGuardError)
+ *  2. loadMainModel(path, config)      — load teacher .tflite (may throw BatteryGuardError)
  *  3. runTiledInference(...)           — full decode → tile → stitch → encode
  *       ├─ shouldAbort() polled before each tile's synchronous inference call
  *       ├─ InferenceAbortError thrown if shouldAbort() returns true
  *       └─ onProgress(fraction) called after each tile [0.0 → 1.0]
  *  4a. DONE    → updateJob(DONE, resultUri)
- *  4b. ABORT   → catch InferenceAbortError → updateJob(BATTERY_PAUSED)
- *  4c. ERROR   → catch generic Error     → failJob(ERROR, message)
+ *  4b. ABORT   → catch InferenceAbortError|BatteryGuardError → updateJob(BATTERY_PAUSED)
+ *  4c. ERROR   → catch generic Error → failJob(ERROR, message)
  *  5.  finally → unloadModel('main'), _currentJobId = null  (always)
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * PIPELINE LIFECYCLE (inner try block — preview job)
  * ─────────────────────────────────────────────────────────────────────────────
  *
- *  1. loadPreviewModel(previewPath)    — load student .tflite into preview slot
+ *  0. getModelConfig(styleId)          — hydrate live config (await; before any load)
+ *  1. loadPreviewModel(path, config)   — load student .tflite into preview slot
  *  2. runPreviewInference(...)         — full decode → tile → stitch → encode
  *       ├─ shouldAbort() polled before each tile
  *       └─ onProgress(fraction) called after each tile [0.0 → 1.0]
  *  3a. DONE    → updateJob(DONE, resultUri)
  *  3b. ABORT   → catch InferenceAbortError → updateJob(BATTERY_PAUSED)
- *  3c. ERROR   → catch generic Error     → failJob(ERROR, message)
+ *  3c. ERROR   → catch generic Error → failJob(ERROR, message)
  *  4.  finally → unloadModel('preview'), _currentJobId = null  (always)
  *
  * PRD § 5 — src/features/style-transfer/StyleJobService.ts
@@ -71,7 +86,11 @@
 
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import * as InferenceEngine from '@/core/inference/InferenceEngine'
-import { getModelPath, getRegistryEntry } from '@/core/storage/ModelManager'
+import {
+	getModelPath,
+	getRegistryEntry,
+	getModelConfig,
+} from '@/core/storage/ModelManager'
 import {
 	runTiledInference,
 	runPreviewInference,
@@ -83,67 +102,105 @@ import { createTracker } from '@/shared/utils/logger'
 const tracker = createTracker('StyleJobService')
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE-LEVEL STATE
+// SECTION 1 — MODULE-LEVEL TRACKING SYNCHRONIZATION STATES
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * FIX 3: Processing lock flag.
- * Set synchronously before the first `await` in processNextJobInQueue.
- * JS single-threaded semantics guarantee mutual exclusion between the
- * if-check and the assignment as long as they are not separated by an await.
+ * Processing lock flag (outer mutex).
+ *
+ * FIX 3: Set synchronously before the first `await` in processNextJobInQueue.
+ * JS single-threaded semantics guarantee mutual exclusion between the guard
+ * check and the assignment as long as no `await` separates them. This is the
+ * only safe concurrency pattern for re-entrancy prevention in single-threaded
+ * JS runtimes (RN Hermes, V8).
  */
-let _processingLock = false
+let _processingLock: boolean = false
 
 /**
- * The JobId of the job currently being processed (between startJob and DONE/ERROR).
- * Distinct from _processingLock: _processingLock gates entry to the function,
- * _currentJobId tracks which job is active for abort/prioritize signalling.
+ * The JobId of the job currently being processed (between startJob and DONE/ERROR/PAUSED).
+ *
+ * Distinct from _processingLock:
+ *   _processingLock  → gates ENTRY to processNextJobInQueue()
+ *   _currentJobId    → identifies the active job for abort/progress signalling
+ *
+ * Cleared in the inner `finally` block (before _processingLock is released in
+ * the outer finally). Null while the queue is idle or between jobs.
  */
 let _currentJobId: JobId | null = null
 
 /**
- * Cooperative abort signal. Set to true by pauseJob/prioritizeJob/cancelJob.
+ * Cooperative abort signal.
  *
- * FIX 7: This flag is now read by TiledInferenceRunner via the `shouldAbort`
- * callback rather than being polled inside a manual setTimeout loop. The runner
- * checks it at the start of each tile iteration (before the synchronous TFLite
- * call) and throws InferenceAbortError if true. Maximum abort latency is one
- * tile's inference time (~50–200ms on Samsung A-series GPU delegate).
+ * FIX 7: Set to `true` by pauseJob(), prioritizeJob(), and cancelJob().
+ * Read synchronously by TiledInferenceRunner via the `shouldAbort` callback.
+ * The runner checks it at the start of each tile iteration (before the
+ * synchronous TFLite call) and throws InferenceAbortError if true.
+ *
+ * Reset to `false` immediately after _currentJobId is claimed (before startJob)
+ * to prevent a stale abort from a prior job from silently aborting its successor.
+ *
+ * Maximum abort latency = one tile's inference time (~50–200ms on mid-range GPU delegate).
  */
-let _abortCurrentJob = false
+let _abortCurrentJob: boolean = false
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SERVICE
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const StyleJobService = {
+	// ─────────────────────────────────────────────────────────────────────────
+	// SECTION 2 — processNextJobInQueue
+	// ─────────────────────────────────────────────────────────────────────────
+
 	/**
-	 * Processes the next QUEUED job in the store, if no job is already running.
-	 *
-	 * Call this after every state change that could add a QUEUED job:
-	 *   - After enqueue()
+	 * Dequeues and processes the next eligible job. Must be called after every
+	 * state change that could produce a QUEUED or PREVIEW_QUEUED job:
+	 *   - After enqueue() / addJob()
 	 *   - After retryJob()
-	 *   - After resumeAll() (battery restored)
+	 *   - After resumeAll() (battery recovered)
 	 *   - On app foreground
 	 *
-	 * FIX 3: _processingLock is set synchronously before the first await,
-	 * preventing concurrent calls from both entering the processing body.
+	 * The outer finally schedules a zero-delay self-call to drain the queue
+	 * without requiring external callers to chain processNextJobInQueue() manually.
 	 *
-	 * FIX 7: The inner try/catch/finally now cleanly handles three outcomes:
-	 *   - DONE          : runTiledInference / runPreviewInference returns successfully
-	 *   - BATTERY_PAUSED: InferenceAbortError caught, job paused
-	 *   - ERROR         : Any other exception, job failed with retryable=true
+	 * ── Lock invariants (Mandate 3) ──────────────────────────────────────────
 	 *
-	 * FIX 9: Model slot routing — QUEUED jobs use the main (teacher, 512×512)
-	 * slot. PREVIEW_QUEUED jobs use the preview (student, 256×256) slot.
-	 * Both models are float32 I/O. CUT normalization applies to both:
-	 *   input:  (pixel / 127.5) − 1.0  →  [-1, 1]  float32
-	 *   output: (v + 1.0) * 0.5        →  [0, 1]   float32 (then × 255 for uint8)
+	 *   Outer try/finally: _processingLock gates entry; released unconditionally.
+	 *   Inner try/catch/finally: hardware slot + job identity; cleaned up atomically.
+	 *
+	 *   The guard check and assignment share no await between them:
+	 *     if (_processingLock) return          ← check
+	 *     _processingLock = true               ← assign (NO await between these)
+	 *
+	 * ── Config hydration (Mandate 1) ─────────────────────────────────────────
+	 *
+	 *   getModelConfig(styleId) is awaited as the first operation inside the inner
+	 *   try, before any InferenceEngine load call. The resolved ModelConfig is
+	 *   passed to loadMainModel / loadPreviewModel, which store it on the hardware
+	 *   slot. TiledInferenceRunner retrieves it via getActiveModelConfig(slot) —
+	 *   avoiding a secondary manifest round-trip inside the hot tile loop.
+	 *
+	 * ── Resolution blindness (Mandate 2) ─────────────────────────────────────
+	 *
+	 *   All log strings, tracker metrics, and error messages that reference a tile
+	 *   dimension read from config.mainModel (main path) or config.previewModel
+	 *   (preview path). No hardcoded resolution literals anywhere in this method.
+	 *
+	 * ── Error handling ───────────────────────────────────────────────────────
+	 *
+	 *   InferenceAbortError  → cooperative tile-boundary interrupt → BATTERY_PAUSED
+	 *   BatteryGuardError    → thrown by loadMainModel at battery threshold → BATTERY_PAUSED
+	 *   generic Error        → pipeline crash (decode, TFLite, Skia, OOM) → ERROR / failJob
+	 *
+	 *   Catch blocks update the Zustand store and fall through to the inner finally.
+	 *   They do NOT duplicate unloadModel or _currentJobId cleanup — that is the
+	 *   exclusive responsibility of the inner finally block.
 	 */
 	async processNextJobInQueue(): Promise<void> {
-		// FIX 3: Guard check + flag set happen with no await between them.
-		// This is the only safe concurrency pattern in single-threaded JS:
-		// check and assign before any suspension point.
+		// ── Mandate 3: Synchronous, ungapped lock acquisition ─────────────────
+		//
+		// FIX 3: The guard check and flag assignment must have no `await` between
+		// them. JS single-threaded event loop guarantees mutual exclusion here.
 		if (_processingLock) return
 		_processingLock = true
 
@@ -151,10 +208,14 @@ export const StyleJobService = {
 			const { jobs, startJob, updateJob, failJob } =
 				useStyleJobStore.getState()
 
-			// Check for preview jobs first (higher priority — live viewfinder UX),
-			// then fall back to regular main-model jobs.
+			// ── Job selection — preview (PREVIEW_QUEUED) takes priority ───────
+			//
+			// FIX 14: Preview jobs are identified exclusively by status === 'PREVIEW_QUEUED'.
+			// The prior implementation incorrectly matched 'BATTERY_PAUSED', which caused
+			// paused main-inference jobs to be routed through the student (preview) model
+			// slot — a silent, hard-to-reproduce corruption of slot occupancy state.
 			const nextPreviewJob = jobs.find(
-				(j) => j.status === 'BATTERY_PAUSED'
+				(j) => j.status === 'PREVIEW_QUEUED'
 			)
 			const nextMainJob = jobs.find((j) => j.status === 'QUEUED')
 			const nextJob = nextPreviewJob ?? nextMainJob
@@ -163,7 +224,8 @@ export const StyleJobService = {
 				return
 			}
 
-			const isPreviewJob = nextJob.status === 'BATTERY_PAUSED'
+			// FIX 14: isPreviewJob derived from the corrected PREVIEW_QUEUED check.
+			const isPreviewJob = nextJob.status === 'PREVIEW_QUEUED'
 			const modelSlot = isPreviewJob ? 'preview' : 'main'
 
 			// ── Model presence guard ──────────────────────────────────────────
@@ -189,29 +251,67 @@ export const StyleJobService = {
 			}
 
 			// ── Claim the job slot ────────────────────────────────────────────
+			//
+			// Mandate 3: _abortCurrentJob reset AFTER _currentJobId is claimed but
+			// BEFORE startJob() is called. Prevents a stale abort signal from a prior
+			// job silently aborting its successor at the first tile boundary check.
 			_currentJobId = nextJob.id
 			_abortCurrentJob = false
 			startJob(_currentJobId)
 
 			try {
+				// ── BUG 12 FIX: Stale snapshot re-verification ────────────────
+				//
+				// `jobs` above is a snapshot captured before any await. Between that
+				// snapshot and `startJob` the user could have called cancelJob() →
+				// removeJob(), deleting the job from the store. startJob() on a
+				// non-existent ID is a silent no-op. The inference pipeline would
+				// then run to completion and write updateJob(id, { status: 'DONE' })
+				// on a ghost ID — also a silent no-op — so the result is permanently
+				// lost and the UI never shows it.
+				//
+				// Fix: re-query the live store at the very top of the inner try,
+				// before any await. If the job is gone, return immediately. The inner
+				// finally still executes (unloadModel + _currentJobId = null).
+				const liveJobCheck = useStyleJobStore
+					.getState()
+					.jobs.find((j) => j.id === _currentJobId)
+				if (!liveJobCheck) {
+					tracker.warn(
+						`[StyleJobService] Job ${_currentJobId} was removed between the ` +
+							`queue snapshot and startJob — skipping inference to prevent ` +
+							`a ghost result write.`
+					)
+					return
+				}
+
+				// ── Mandate 1: Hydrate live model config ──────────────────────
+				//
+				// FIX 11: getModelConfig MUST be fully resolved before any call to
+				// loadMainModel or loadPreviewModel. The config object is passed
+				// directly to the loader, which stores it on the hardware slot via
+				// _loadedConfigs[slot]. TiledInferenceRunner reads it back through
+				// InferenceEngine.getActiveModelConfig(slot) — no secondary manifest
+				// query in the hot tile loop.
+				const config = await getModelConfig(nextJob.styleId)
+
 				if (isPreviewJob) {
-					// ── PREVIEW PATH: student model, 256×256, float32 ─────────────
+					// ── PREVIEW PATH: student model, dynamic previewModel-res, float32 ─
 					//
-					// Student model:
-					//   artlens_student_ngf32_b4_e150_zpad_simplified_float32.tflite
-					//   Input  : [1, 256, 256, 3] float32 NHWC, values in [-1, 1]
-					//   Output : [1, 256, 256, 3] float32 NHWC, Tanh → [-1, 1]
+					// Student model tile resolution: config.previewModel (e.g. 256)
+					//   Input  : [1, R, R, 3] float32 NHWC, values in [-1, 1]  (R = config.previewModel)
+					//   Output : [1, R, R, 3] float32 NHWC, Tanh → [-1, 1]
+					//   Normalization: (pixel / 127.5) − 1.0 → [-1, 1]  (both I/O float32)
 					//
-					// FIX 2: loadPreviewModel is async — must be awaited.
-					// No unloadModel('main') needed here: the preview slot is independent.
-					// If a main model is loaded, it remains; preview slot is separate.
-					await InferenceEngine.loadPreviewModel(modelPath)
+					// No explicit unloadModel('main') needed: loadPreviewModel unloads
+					// 'main' synchronously before its first internal await.
+					await InferenceEngine.loadPreviewModel(modelPath, config)
 
 					const result = await runPreviewInference(
 						nextJob.sourceUri,
 						nextJob.styleId,
 						{
-							// FIX 8: Guard against a null _currentJobId.
+							// FIX 8: Guard against a null _currentJobId before writing progress.
 							onProgress: (fraction: number) => {
 								if (_currentJobId) {
 									updateJob(_currentJobId, {
@@ -219,6 +319,8 @@ export const StyleJobService = {
 									})
 								}
 							},
+							// Reads _abortCurrentJob synchronously — no async gap between
+							// the read and the InferenceAbortError throw in TiledInferenceRunner.
 							shouldAbort: () => _abortCurrentJob,
 						}
 					)
@@ -232,34 +334,40 @@ export const StyleJobService = {
 
 					tracker.log(
 						`[StyleJobService] Preview job ${_currentJobId} DONE — ` +
-							`${result.totalTiles} tiles, ${result.durationMs}ms, ` +
-							`uri=${result.resultUri}`
+							// FIX 12: Resolution derived from live config, not hardcoded literal.
+							`${result.totalTiles} tiles @ ${config.previewModel}×${config.previewModel}, ` +
+							`${result.durationMs}ms, uri=${result.resultUri}`
 					)
 				} else {
-					// ── MAIN PATH: teacher model, 512×512, float32 ────────────────
+					// ── MAIN PATH: teacher model, dynamic mainModel-res, float32 ──────
 					//
-					// Teacher model:
-					//   artlens_teacher_ngf64_e179_ph1_zpad_simplified_float32.tflite
-					//   Input  : [1, 512, 512, 3] float32 NHWC, values in [-1, 1]
-					//   Output : [1, 512, 512, 3] float32 NHWC, Tanh → [-1, 1]
+					// Teacher model tile resolution: config.mainModel (e.g. 512)
+					//   Input  : [1, R, R, 3] float32 NHWC, values in [-1, 1]  (R = config.mainModel)
+					//   Output : [1, R, R, 3] float32 NHWC, Tanh → [-1, 1]
+					//   Normalization: (pixel / 127.5) − 1.0 → [-1, 1]  (both I/O float32)
 					//
-					// FIX 1: loadMainModel is async — must be awaited.
-					// FIX 4: Unload preview BEFORE loading main — guarantees single-slot
-					//   occupancy (InferenceEngine enforces one loaded model at a time).
+					// FIX 4 (preserved): Unload 'preview' synchronously before the first
+					// await inside loadMainModel — guarantees single-slot occupancy.
+					// loadMainModel also performs this unload internally, but the explicit
+					// call here provides a belt-and-suspenders invariant for slot clarity.
 					InferenceEngine.unloadModel('preview')
-					await InferenceEngine.loadMainModel(modelPath)
 
-					// ── Real tiled inference pipeline ─────────────────────────────
+					// FIX 1: loadMainModel is async — awaited.
+					// FIX 11: config passed as second argument — stored on hardware slot.
+					// May throw BatteryGuardError (caught below alongside InferenceAbortError).
+					await InferenceEngine.loadMainModel(modelPath, config)
+
+					// ── Real tiled inference pipeline ─────────────────────────────────
 					//
 					// runTiledInference() drives the full pipeline:
 					//   Phase 1  DECODE   sourceUri → Skia → fullRgba Uint8Array
 					//   Phase 2  GRID     tileImage(W, H, config) → TileGrid
 					//   Phase 3  HOT LOOP for each coord:
-					//              A) _extractTileRgba → _tileScratch[512×512×4]
-					//              B) prepareInputTensor → mainInputBuffer[512×512×3×4]
-					//                 normalization: (pixel/127.5) − 1.0 → [-1, 1] float32
+					//              A) _extractTileRgba → _tileScratch[R×R×4]
+					//              B) prepareInputTensor → mainInputBuffer[R×R×3×4] float32
+					//                 normalization: (pixel/127.5) − 1.0 → [-1, 1]
 					//              C) runInferenceSync('main') → rawF32 ArrayBuffer
-					//                 [1,512,512,3] float32 NHWC, Tanh → [-1, 1]
+					//                 [1,R,R,3] float32 NHWC, Tanh → [-1, 1]
 					//              D) push ProcessedTile{ coord, rawF32 }
 					//              E) shouldAbort() → throw InferenceAbortError if true
 					//              F) onProgress(k/total) → updateJob progress
@@ -268,19 +376,17 @@ export const StyleJobService = {
 					//              denormalization: (v + 1.0) × 0.5 inline per pixel
 					//   Phase 5  EXPORT   f32StitchedToRgba → Skia JPEG → cache write
 					//
-					// CALLBACKS:
-					//   onProgress(fraction)  — strict [0.0, 1.0] per tile completion.
-					//   shouldAbort()         — reads _abortCurrentJob synchronously.
+					// R (tile resolution) is read from InferenceEngine.getActiveModelConfig('main')
+					// by TiledInferenceRunner — supplied via the config object passed to loadMainModel.
 					const result = await runTiledInference(
 						nextJob.sourceUri,
 						nextJob.styleId,
 						{
 							/**
 							 * FIX 8: Guard against a null _currentJobId.
-							 * This cannot happen in practice (the lock guarantees single
-							 * occupancy and _currentJobId is only cleared in finally), but
-							 * the defensive check satisfies the TypeScript null-check and
-							 * prevents a silent update to a stale slot on unexpected re-entry.
+							 * Cannot occur in practice under the lock invariant, but satisfies
+							 * TypeScript null-check and prevents a silent write to a stale slot
+							 * in the event of unexpected re-entry.
 							 */
 							onProgress: (fraction: number) => {
 								if (_currentJobId) {
@@ -290,18 +396,14 @@ export const StyleJobService = {
 								}
 							},
 							/**
-							 * Returns the current cooperative abort signal.
-							 * Read synchronously — no async gap between the read and the
-							 * InferenceAbortError throw inside TiledInferenceRunner.
+							 * Returns the current cooperative abort signal synchronously.
+							 * No async gap between the read and the InferenceAbortError throw
+							 * inside TiledInferenceRunner.
 							 */
 							shouldAbort: () => _abortCurrentJob,
 						}
 					)
 
-					// ── Job completed successfully ─────────────────────────────────
-					//
-					// result.resultUri is the absolute file:// URI of the JPEG written
-					// to Paths.cache by TiledInferenceRunner._encodeAndSave().
 					if (_currentJobId) {
 						updateJob(_currentJobId, {
 							status: 'DONE',
@@ -310,38 +412,53 @@ export const StyleJobService = {
 					}
 
 					tracker.log(
-						`[StyleJobService] Job ${_currentJobId} DONE — ` +
-							`${result.totalTiles} tiles, ${result.durationMs}ms, ` +
-							`uri=${result.resultUri}`
+						`[StyleJobService] Main job ${_currentJobId} DONE — ` +
+							// FIX 12: Resolution derived from live config, not hardcoded literal.
+							`${result.totalTiles} tiles @ ${config.mainModel}×${config.mainModel}, ` +
+							`${result.durationMs}ms, uri=${result.resultUri}`
 					)
 				}
 			} catch (error) {
-				// ── FIX 7: Discriminated abort vs. error handling ─────────────
+				// ── FIX 7 / FIX 13: Discriminated pause vs. error handling ──────────
 				//
-				// InferenceAbortError is thrown by TiledInferenceRunner /
-				// runPreviewInference when shouldAbort() returns true at a tile
-				// boundary. This is a cooperative interruption, NOT a pipeline failure.
+				// TWO COOPERATIVE INTERRUPTION TYPES → BATTERY_PAUSED:
 				//
-				// BATTERY_PAUSED semantics:
-				//   - Job is preserved in the queue at its current styleId.
-				//   - Progress is reset to 0 when resumeAll() re-queues it.
-				//   - The job can be resumed once battery recovers.
-				//   - No error overlay is shown in Gallery or EditCanvas.
-				//   - retryable is NOT set to true (no Retry button shown).
+				//   InferenceAbortError — thrown by TiledInferenceRunner when
+				//     shouldAbort() returns true at a tile boundary. A cooperative
+				//     interruption: job can be resumed once battery recovers or the
+				//     user re-queues.
 				//
-				// The finally block below handles unloadModel and _currentJobId = null
-				// for BOTH the abort and error paths.
-				// DO NOT duplicate that cleanup here.
-				if (error instanceof InferenceAbortError) {
+				//   BatteryGuardError (FIX 13) — thrown by loadMainModel when battery
+				//     level ≤ BATTERY_LIMITS.CRITICAL_THRESHOLD_PERCENT. Treated
+				//     identically to InferenceAbortError — job transitions to
+				//     BATTERY_PAUSED, not ERROR. No Retry button shown.
+				//
+				// BATTERY_PAUSED semantics (both types):
+				//   - Job preserved in queue at its current styleId.
+				//   - Progress reset to 0 when resumeAll() re-queues it.
+				//   - No error overlay shown in Gallery or EditCanvas.
+				//   - retryable NOT set to true.
+				//
+				// CRITICAL: Do NOT call unloadModel or clear _currentJobId here.
+				// The inner finally block below is the sole owner of that cleanup.
+				if (
+					error instanceof InferenceAbortError ||
+					error instanceof InferenceEngine.BatteryGuardError
+				) {
+					const pauseReason =
+						error instanceof InferenceEngine.BatteryGuardError
+							? `low battery (${error.batteryLevel}%)`
+							: 'cooperative tile-boundary abort'
+
 					tracker.log(
-						`[StyleJobService] Job ${_currentJobId} aborted cooperatively ` +
-							`at tile boundary → BATTERY_PAUSED.`
+						`[StyleJobService] Job ${_currentJobId} interrupted — ` +
+							`${pauseReason} → BATTERY_PAUSED.`
 					)
 					if (_currentJobId) {
 						updateJob(_currentJobId, { status: 'BATTERY_PAUSED' })
 					}
-					// Intentional fall-through to finally — no return needed.
-					// The finally block unloads the model and clears _currentJobId.
+					// Intentional fall-through to inner finally.
+					// unloadModel and _currentJobId = null are handled there exclusively.
 				} else {
 					// Genuine pipeline failure: decode error, TFLite crash,
 					// filesystem write failure, Skia encode failure, OOM, etc.
@@ -357,32 +474,49 @@ export const StyleJobService = {
 								: 'Internal pipeline error. Tap Retry to try again.'
 						)
 					}
+					// Intentional fall-through to inner finally.
 				}
 			} finally {
-				// ── Guaranteed cleanup — runs in EVERY exit path ──────────────
+				// ── Inner finally: hardware slot + job identity cleanup ────────────
 				//
-				// FIX 4 (preserved from v2): unloadModel BEFORE clearing _currentJobId.
-				// This prevents a race where the preview loop could reload the preview
-				// slot while main is still resident (only 2 slots total per engine).
+				// FIX 4 (preserved): unloadModel BEFORE clearing _currentJobId.
+				// Prevents the preview loop from reloading the preview slot while the
+				// main model is still resident (InferenceEngine enforces one model per slot).
 				//
-				// FIX 9 (new): unload the slot that was loaded for this job type.
-				// Preview jobs load 'preview'; main jobs load 'main'. Each must be
-				// explicitly unloaded to release the native TFLite runtime allocation.
-				const slotToUnload = isPreviewJob ? 'preview' : 'main'
-				InferenceEngine.unloadModel(slotToUnload)
+				// Mandate 3: Must always unload the slot that was loaded for THIS job type.
+				// Preview jobs load 'preview'; main jobs load 'main'.
+				// Safe to call even if loadMainModel/loadPreviewModel threw before completing —
+				// unloadModel is a synchronous no-op on an already-empty slot.
+				InferenceEngine.unloadModel(isPreviewJob ? 'preview' : 'main')
 				_currentJobId = null
 			}
 		} finally {
-			// FIX 3: Release the processing lock in all exit paths.
-			// This runs after the inner try/catch/finally completes, allowing
-			// the next call to processNextJobInQueue() to enter the body.
+			// ── Outer finally: processing lock release + queue continuation ────────
+			//
+			// FIX 3 (preserved): _processingLock released unconditionally in all exit
+			// paths — including early returns (no nextJob, missing model pack) and any
+			// unhandled throw that escapes the inner try.
+			//
+			// FIX 15: Zero-delay setTimeout schedules the next queue drain cycle after
+			// the current microtask checkpoint, allowing pending Zustand state mutations
+			// (DONE, BATTERY_PAUSED, ERROR) to settle before the next dequeue attempt.
+			// This keeps the queue processing fluidly without requiring external callers
+			// to re-invoke processNextJobInQueue() after each job completes.
 			_processingLock = false
+			setTimeout(() => StyleJobService.processNextJobInQueue(), 0)
 		}
 	},
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// SECTION 3 — QUEUE ORCHESTRATION & CANCELLATION HANDLERS
+	// ─────────────────────────────────────────────────────────────────────────
 
 	/**
 	 * Moves a QUEUED job to the front of the queue, interrupting the current
 	 * job at its next tile boundary if it is a different job.
+	 *
+	 * Sets _abortCurrentJob = true only when the active job differs from jobId,
+	 * so prioritizing the already-running job is a safe no-op.
 	 */
 	prioritizeJob(jobId: JobId): void {
 		const { prioritize } = useStyleJobStore.getState()
@@ -393,9 +527,12 @@ export const StyleJobService = {
 	},
 
 	/**
-	 * Signals the current job to pause at the next tile boundary.
-	 * The job's status is updated to BATTERY_PAUSED inside the catch block
-	 * when InferenceAbortError is caught (FIX 7).
+	 * Signals the current job to pause at the next tile boundary by setting
+	 * _abortCurrentJob = true.
+	 *
+	 * FIX 7 (preserved): The status transition to BATTERY_PAUSED is handled
+	 * inside the InferenceAbortError catch block in processNextJobInQueue, NOT
+	 * here. This method is a pure signal — no store mutations.
 	 */
 	pauseJob(jobId: JobId): void {
 		if (_currentJobId === jobId) {
@@ -404,23 +541,44 @@ export const StyleJobService = {
 	},
 
 	/**
-	 * Resumes all BATTERY_PAUSED jobs by resetting them to QUEUED.
-	 * Call when battery level rises above threshold or power-saver is disabled.
+	 * Resumes all BATTERY_PAUSED jobs by transitioning them to QUEUED with
+	 * progress reset to 0. Call when battery level rises above threshold or
+	 * power-saver mode is disabled.
+	 *
+	 * BUG 11 FIX: Previously this method only updated job statuses without
+	 * triggering queue processing. If the queue had drained to empty before
+	 * the battery pause (all other jobs finished, only paused jobs remained),
+	 * `_processingLock` was false and no setTimeout continuation was pending.
+	 * After resumeAll() the paused jobs transitioned to QUEUED but nothing
+	 * called processNextJobInQueue() — they sat in QUEUED permanently until
+	 * some other action re-triggered the service.
+	 *
+	 * Fix: call processNextJobInQueue() unconditionally after status updates.
+	 * If the queue is already draining (lock held), processNextJobInQueue
+	 * is a fast no-op (guard check + return). If the queue is idle, it starts
+	 * the drain cycle immediately.
 	 */
 	resumeAll(): void {
 		const { jobs, updateJob } = useStyleJobStore.getState()
 		jobs.filter((j) => j.status === 'BATTERY_PAUSED').forEach((j) =>
 			updateJob(j.id, { status: 'QUEUED', progress: 0 })
 		)
+		StyleJobService.processNextJobInQueue()
 	},
 
 	/**
 	 * Cancels a job, removing it from the active processing pipeline.
 	 *
-	 * FIX 5 (preserved from v2): Delegates to useStyleJobStore.removeJob() to
-	 * fully remove the cancelled job rather than setting status: 'ERROR'. A
-	 * user-initiated cancellation is not an error state and should not display
-	 * the error UI or offer a "Retry" button.
+	 * FIX 5 (preserved): Delegates to useStyleJobStore.removeJob() to fully
+	 * remove the cancelled job rather than transitioning it to ERROR. A
+	 * user-initiated cancellation is not a failure state and must not display
+	 * an error overlay or offer a Retry button.
+	 *
+	 * If the job is currently active, sets _abortCurrentJob = true so the
+	 * runner exits at the next tile boundary. The store removal happens
+	 * synchronously; the inner finally will still fire (unloadModel,
+	 * _currentJobId = null) but updateJob/failJob calls in the catch will
+	 * silently no-op on the already-removed job ID.
 	 */
 	cancelJob(jobId: JobId): void {
 		if (_currentJobId === jobId) {
@@ -441,6 +599,7 @@ export const StyleJobService = {
 			(j) =>
 				j.styleId === styleId &&
 				(j.status === 'QUEUED' ||
+					j.status === 'PREVIEW_QUEUED' ||
 					j.status === 'BATTERY_PAUSED' ||
 					j.status === 'PROCESSING')
 		)
