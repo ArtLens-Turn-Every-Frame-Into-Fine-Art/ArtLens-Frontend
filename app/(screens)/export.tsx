@@ -186,7 +186,9 @@ function deriveFilename(styleName: string, exportFormat: ExportFormat): string {
 	].join('-')
 	const safe = styleName.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_')
 	const ext = exportFormat.toLowerCase()
-	return `${APP_INFO.name}_${date}_${safe}.${ext}`
+	const timestamp = now.getTime()
+
+	return `${APP_INFO.name}_${date}_${safe}_${timestamp}.${ext}`
 }
 
 function mimeTypeFor(exportFormat: ExportFormat): string {
@@ -448,9 +450,7 @@ export default function ExportScreen(): React.JSX.Element {
 			const destFile = new File(Paths.cache, filename)
 			sourceFile.copy(destFile)
 
-			useStyleJobStore.getState().updateJobOutputUri(job.id, destFile.uri)
-
-			const asset = await MediaLibrary.createAssetAsync(destFile.uri)
+			let asset = await MediaLibrary.createAssetAsync(destFile.uri)
 
 			const albums = await MediaLibrary.getAlbumsAsync({
 				includeSmartAlbums: false,
@@ -469,6 +469,15 @@ export default function ExportScreen(): React.JSX.Element {
 					false
 				)
 			}
+
+			const albumAssets = await MediaLibrary.getAssetsAsync({
+				album: existingAlbum || APP_INFO.album,
+				sortBy: [[MediaLibrary.SortBy.creationTime, false]], // Get most recent asset first
+				first: 1,
+			})
+
+			const realAsset = albumAssets.assets[0] || asset
+			const trueUri = realAsset.uri
 
 			try {
 				destFile.delete()
@@ -505,10 +514,13 @@ export default function ExportScreen(): React.JSX.Element {
 			}
 
 			if (jobId && asset.uri) {
-				updateJob(jobId, { resultUri: asset.uri })
+				updateJob(jobId, { resultUri: trueUri })
 				tracker.log(
 					'job.resultUri updated to permanent gallery asset URI',
-					{ jobId, assetUri: asset.uri }
+					{
+						jobId,
+						assetUri: trueUri,
+					}
 				)
 			}
 
@@ -523,7 +535,7 @@ export default function ExportScreen(): React.JSX.Element {
 			tracker.log('Artwork saved to gallery successfully', {
 				jobId,
 				filename,
-				assetUri: asset.uri,
+				assetUri: trueUri,
 				albumName: APP_INFO.album,
 			})
 		} catch (err) {
@@ -551,16 +563,16 @@ export default function ExportScreen(): React.JSX.Element {
 			setIsSaving(false)
 		}
 	}, [
-		outputUri,
-		isSaving,
-		isSaved,
-		filename,
 		exportFormat,
+		filename,
+		isSaved,
+		isSaving,
+		job,
 		jobId,
+		outputUri,
 		quality,
 		styleName,
 		updateJob,
-		job,
 	])
 
 	// ── Share (unchanged) ─────────────────────────────────────────────────────

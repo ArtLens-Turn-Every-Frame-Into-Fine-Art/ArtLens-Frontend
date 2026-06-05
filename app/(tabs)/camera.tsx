@@ -207,7 +207,11 @@ export default function CameraScreen(): React.JSX.Element {
 
 		try {
 			const photo = await photoOutput.capturePhotoToFile(
-				{ flashMode },
+				{
+					flashMode,
+					enableShutterSound: false,
+					enableDistortionCorrection: true,
+				},
 				{}
 			)
 
