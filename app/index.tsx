@@ -7,7 +7,16 @@
  */
 
 import { Redirect } from 'expo-router'
+import Constants, { ExecutionEnvironment } from 'expo-constants'
 
-export default function Index(): React.JSX.Element {
+const isExpoGo =
+	Constants.executionEnvironment === ExecutionEnvironment.StoreClient
+
+export default function Index(): React.ReactNode {
+	if (isExpoGo) {
+		console.warn('Nitro Modules are disabled in Expo Go.')
+		return null
+	}
+
 	return <Redirect href="/(tabs)/home" />
 }
