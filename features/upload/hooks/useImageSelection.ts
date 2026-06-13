@@ -50,7 +50,7 @@ export interface UseImageSelectionReturn {
  *                     and avoid importing the Expo Router type tree in a shared hook.
  *                     The only call made is navigation.navigate('StyleSelection', {...}).
  */
-export function useImageSelection(navigation: any): UseImageSelectionReturn {
+export function useImageSelection(): UseImageSelectionReturn {
 	const [isPicking, setIsPicking] = useState<boolean>(false)
 	const [error, setError] = useState<string | null>(null)
 	const router = useRouter()

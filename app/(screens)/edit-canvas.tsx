@@ -28,7 +28,7 @@
  *   - src/types/index.ts
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
 	ActivityIndicator,
 	Alert,
@@ -51,16 +51,6 @@ import Animated, {
 	useSharedValue,
 	withTiming,
 } from 'react-native-reanimated'
-import { Gesture, GestureDetector } from 'react-native-gesture-handler'
-import {
-	Canvas,
-	Image as SkiaImage,
-	Path,
-	Mask,
-	Skia,
-	useImage,
-	SkPath,
-} from '@shopify/react-native-skia'
 import {
 	AlertCircle,
 	Battery,
@@ -79,7 +69,6 @@ import {
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import { useModelStore } from '@/shared/stores/useModelStore'
 import { StyleJobService } from '@/features/style-transfer/StyleJobService'
-import { SkiaRenderer } from '@/features/canvas/SkiaRenderer'
 import { ImageCompareSlider } from '@/shared/ui/ImageCompareSlider'
 
 // — Types ——————————————————————————————————————————————————————————————————————
@@ -112,9 +101,6 @@ const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window')
 
 // Canvas area height — same proportion used by the original mainImage style
 const CANVAS_H = SCREEN_H * 0.65
-
-// Singleton renderer — shared across renders, no re-instantiation cost
-const _renderer = new SkiaRenderer()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUB-COMPONENTS
@@ -438,219 +424,6 @@ const ControlsPanel: React.FC<ControlsPanelProps> = React.memo(
 ControlsPanel.displayName = 'ControlsPanel'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DONE-STATE: INTERACTIVE ALPHA-MASK BRUSH CANVAS
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface BrushCanvasProps {
-	sourceUri: string
-	resultUri: string
-	/** Called with the output composite file:// URI after snapshot completes */
-	onNext: (compositeUri: string) => void
-	onError: (message: string) => void
-}
-
-/**
- * Interactive alpha-masking workspace rendered when job.status === 'DONE'.
- *
- * Architecture:
- *   - Gesture.Pan drives SkPath mutations via runOnJS (Reanimated worklet-safe)
- *   - A Reanimated shared value `_redrawTick` is incremented on each gesture
- *     event, causing only the Skia canvas subtree to repaint — the outer React
- *     tree is never re-rendered during brush strokes.
- *   - Scale factors map screen gesture coordinates → raw image pixel space so
- *     the SkPath stored in the renderer matches the actual pixel dimensions
- *     required by createCompositeSurfaceSnapshot.
- */
-const BrushCanvas: React.FC<BrushCanvasProps> = React.memo(
-	({ sourceUri, resultUri, onNext, onError }) => {
-		// ── Skia image hooks — null until decoded ──────────────────────────
-		const originalImage = useImage(sourceUri)
-		const styledImage = useImage(resultUri)
-
-		// ── Persistent brush path — survives re-renders, never triggers them ─
-		const pathRef = useRef<SkPath>(Skia.Path.Make())
-
-		// ── Redraw tick — incremented by gesture handler to re-paint canvas ──
-		// Using a plain React state here keeps things simple while the heavy
-		// work (path mutation) stays off the bridge via runOnJS delegation.
-		const [, forceRedraw] = useState(0)
-		const triggerRedraw = useCallback(() => {
-			forceRedraw((n) => n + 1)
-		}, [])
-
-		// ── Snapshot export state ──────────────────────────────────────────
-		const [isExporting, setIsExporting] = useState(false)
-
-		// ── Image dimension tracking for scale factors ─────────────────────
-		// We use the image's natural pixel dimensions for the off-screen surface.
-		// The canvas view occupies SCREEN_W × CANVAS_H display points.
-		const imageNaturalWidth = originalImage?.width() ?? SCREEN_W
-		const imageNaturalHeight = originalImage?.height() ?? CANVAS_H
-
-		// Scale: display points → image pixel space
-		const scaleX = imageNaturalWidth / SCREEN_W
-		const scaleY = imageNaturalHeight / CANVAS_H
-
-		// ── Pan gesture — zero-lag finger brush ───────────────────────────
-		const panGesture = Gesture.Pan()
-			.runOnJS(true)
-			.onStart((event) => {
-				pathRef.current.moveTo(event.x * scaleX, event.y * scaleY)
-				triggerRedraw()
-			})
-			.onUpdate((event) => {
-				pathRef.current.lineTo(event.x * scaleX, event.y * scaleY)
-				triggerRedraw()
-			})
-
-		// ── Snapshot handler — invoked by parent's "Next" button ──────────
-		const handleSnapshot = useCallback(async () => {
-			if (!originalImage || !styledImage) return
-			setIsExporting(true)
-			try {
-				const compositeUri =
-					await _renderer.createCompositeSurfaceSnapshot(
-						sourceUri,
-						resultUri,
-						pathRef.current,
-						imageNaturalWidth,
-						imageNaturalHeight
-					)
-				onNext(compositeUri)
-			} catch (err) {
-				const msg =
-					err instanceof Error
-						? err.message
-						: 'Composite export failed.'
-
-				// ENHANCED LOGGING: Capture surface metrics, aspect values, and underlying runtime error traces
-				tracker.error('Skia composite snapshot conversion failed', {
-					error: err,
-					dimensions: {
-						naturalWidth: imageNaturalWidth,
-						naturalHeight: imageNaturalHeight,
-						canvasDisplayHeight: CANVAS_H,
-						screenWidth: SCREEN_W,
-					},
-					paths: {
-						sourceUri: sourceUri?.substring(0, 120), // Protect length bounds safely
-						resultUri: resultUri?.substring(0, 120),
-					},
-					componentPhase: 'BrushCanvas_Export_Surface',
-				})
-
-				onError(msg)
-			} finally {
-				setIsExporting(false)
-			}
-		}, [
-			originalImage,
-			styledImage,
-			sourceUri,
-			resultUri,
-			imageNaturalWidth,
-			imageNaturalHeight,
-			onNext,
-			onError,
-		])
-
-		// Expose handleSnapshot via imperative ref so parent header button
-		// can invoke it without prop drilling into nested JSX.
-		// We store it on a stable ref so the parent callback stays stable.
-		useEffect(() => {
-			_snapshotHandlerRef.current = handleSnapshot
-		}, [handleSnapshot])
-
-		// ── Loading state — wait for both images ──────────────────────────
-		if (!originalImage || !styledImage) {
-			return (
-				<View style={styles.brushLoadingContainer}>
-					<ActivityIndicator color={C.primaryMid} size="large" />
-					<Text style={styles.brushLoadingText}>
-						Loading artwork…
-					</Text>
-				</View>
-			)
-		}
-
-		// ── Exporting overlay ──────────────────────────────────────────────
-		if (isExporting) {
-			return (
-				<View style={styles.brushLoadingContainer}>
-					<ActivityIndicator color={C.accent} size="large" />
-					<Text style={styles.brushLoadingText}>Compositing…</Text>
-				</View>
-			)
-		}
-
-		// ── Interactive canvas stack ───────────────────────────────────────
-		return (
-			<GestureDetector gesture={panGesture}>
-				<View style={styles.brushCanvasWrapper}>
-					<Canvas style={styles.brushCanvas}>
-						{/* Layer 1: Original image — full bleed base */}
-						<SkiaImage
-							image={originalImage}
-							x={0}
-							y={0}
-							width={SCREEN_W}
-							height={CANVAS_H}
-							fit="cover"
-						/>
-
-						{/* Layer 2: Stylized image, revealed only where user paints.
-						    We use Skia's <Mask> component in alpha mode:
-						    - The mask draws a stroked Path (opaque = reveal)
-						    - The masked child draws the styled image
-						    This achieves the "brush reveals AI style" effect at GPU speed. */}
-						<Mask
-							mode="alpha"
-							mask={
-								<Path
-									path={pathRef.current}
-									style="stroke"
-									strokeWidth={35}
-									strokeCap="round"
-									strokeJoin="round"
-									color="white"
-								/>
-							}
-						>
-							<SkiaImage
-								image={styledImage}
-								x={0}
-								y={0}
-								width={SCREEN_W}
-								height={CANVAS_H}
-								fit="cover"
-							/>
-						</Mask>
-					</Canvas>
-
-					{/* Brush hint pill — fades after first stroke */}
-					<View style={styles.brushHint} pointerEvents="none">
-						<Brush color={C.white} size={14} strokeWidth={1.8} />
-						<Text style={styles.brushHintText}>
-							Paint to reveal art style
-						</Text>
-					</View>
-				</View>
-			</GestureDetector>
-		)
-	}
-)
-BrushCanvas.displayName = 'BrushCanvas'
-
-/**
- * Module-level ref for the snapshot handler so the parent screen's header
- * "Next" button can invoke it without re-creating callbacks on every render.
- * Pattern: child registers handler → parent invokes via ref.
- */
-const _snapshotHandlerRef = {
-	current: null as (() => Promise<void>) | null,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -819,7 +592,7 @@ export default function EditCanvasScreen(): React.JSX.Element {
 					{job && (
 						<Text style={styles.headerSub}>
 							{job.status === 'DONE'
-								? '✦ paint to reveal'
+								? '✦ PROCESSED'
 								: job.status === 'PROCESSING'
 									? `${Math.round(job.progress * 100)}% complete`
 									: job.status === 'QUEUED'
@@ -921,51 +694,6 @@ export default function EditCanvasScreen(): React.JSX.Element {
 				</View>
 			)}
 
-			{/* ── DONE-state tool strip ────────────────────────────────────── */}
-			{isDone && (
-				<View
-					style={[
-						styles.doneToolStrip,
-						{ paddingBottom: insets.bottom + 12 },
-					]}
-				>
-					<Pressable
-						onPress={() => {
-							// Clear path and force canvas re-render
-							pathRef_global.current = Skia.Path.Make()
-							// We need to trigger a re-render in BrushCanvas
-							// The simplest way is to navigate-in-place or signal via
-							// a module-level counter — here we use an Alert for clarity
-							Alert.alert(
-								'Clear brush?',
-								'This will erase your painted mask.',
-								[
-									{ text: 'Cancel', style: 'cancel' },
-									{
-										text: 'Clear',
-										style: 'destructive',
-										onPress: () => {
-											// Path is module-level — see note below
-										},
-									},
-								]
-							)
-						}}
-						style={styles.clearBtn}
-						accessibilityRole="button"
-						accessibilityLabel="Clear brush strokes"
-					>
-						<Text style={styles.clearBtnText}>Clear</Text>
-					</Pressable>
-
-					<View style={styles.brushSizeHint}>
-						<Text style={styles.brushSizeText}>
-							Brush size: 35px
-						</Text>
-					</View>
-				</View>
-			)}
-
 			{/* ── Controls: style intensity slider + AI prompt (all states) ─── */}
 			<ControlsPanel
 				intensity={intensity}
@@ -1015,16 +743,6 @@ export default function EditCanvasScreen(): React.JSX.Element {
 		</KeyboardAvoidingView>
 	)
 }
-
-/**
- * Module-level path ref used by the Clear button in the tool strip.
- * The BrushCanvas component reads pathRef internally; we expose a secondary
- * handle here so the strip can signal a clear without complex prop wiring.
- *
- * In a full implementation this would be lifted into a Zustand atom or a
- * shared context — kept simple here for architectural clarity.
- */
-const pathRef_global = { current: Skia.Path.Make() }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLES
@@ -1129,26 +847,6 @@ const styles = StyleSheet.create({
 		color: C.textMuted,
 		fontSize: 14,
 		fontWeight: '500',
-	},
-	brushHint: {
-		position: 'absolute',
-		bottom: 20,
-		alignSelf: 'center',
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 6,
-		backgroundColor: 'rgba(0,0,0,0.55)',
-		borderRadius: 20,
-		paddingHorizontal: 14,
-		paddingVertical: 7,
-		borderWidth: StyleSheet.hairlineWidth,
-		borderColor: 'rgba(0,0,0,0.15)',
-	},
-	brushHintText: {
-		color: 'rgba(255,255,255,0.7)',
-		fontSize: 12,
-		fontWeight: '500',
-		letterSpacing: 0.2,
 	},
 
 	// ── Status overlay ────────────────────────────────────────────────────────

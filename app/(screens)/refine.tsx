@@ -185,7 +185,7 @@ export default function RefineScreen(): React.JSX.Element {
 			filename,
 			'image/png'
 		)
-		await destFile.write(base64, { encoding: 'base64' })
+		destFile.write(base64, { encoding: 'base64' })
 		return destFile.uri
 	}, [canvasRef, jobId])
 
