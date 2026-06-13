@@ -2,37 +2,64 @@ name: EAS Build Complete Receiver
 
 on:
   repository_dispatch:
-    types: [eas-build]
+    types:
+      - eas-build
 
 jobs:
   upload-artifact:
+    name: Attach EAS Artifact To Release
     runs-on: ubuntu-latest
-    if: github.event.client_payload.status == 'finished'
-    steps:
-      - name: 📥 Download Artifact
-        id: download
-        run: |
-          # Detect platform from the Expo webhook payload
-          PLATFORM="${{ github.event.client_payload.platform }}"
+    permissions:
+      contents: write
+    if: |
+      github.event.client_payload.status == 'finished' &&
+      github.event.client_payload.artifacts.applicationArchiveUrl != ''
 
-          if [ "$PLATFORM" == "android" ]; then
-            FILENAME="ArtLens_arm64-v8a.apk"
+    outputs:
+      downloaded_file: ${{ steps.download.outputs.file }}
+
+    steps:
+      - name: 📥 Download Build Artifact
+        id: download
+        shell: bash
+        run: |
+          PLATFORM="${{ github.event.client_payload.platform }}"
+          DOWNLOAD_URL="${{ github.event.client_payload.artifacts.applicationArchiveUrl }}"
+
+          echo "Platform: $PLATFORM"
+
+          if [ "$PLATFORM" = "android" ]; then
+            FILENAME="ArtLens-android"
+            if [[ "$DOWNLOAD_URL" == *.apk* ]]; then
+              FILENAME="${FILENAME}.apk"
+            elif [[ "$DOWNLOAD_URL" == *.aab* ]]; then
+              FILENAME="${FILENAME}.aab"
+            else
+              FILENAME="${FILENAME}.bin"
+            fi
+          elif [ "$PLATFORM" = "ios" ]; then
+            FILENAME="ArtLens-ios.ipa"
           else
-            FILENAME="ArtLens.ipa"
+            echo "Unknown platform: $PLATFORM"
+            exit 1
           fi
 
-          # Download the file using the direct URL from Expo
-          curl -L "${{ github.event.client_payload.artifacts.applicationArchiveUrl }}" -o "$FILENAME"
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            "$DOWNLOAD_URL" \
+            --output "$FILENAME"
 
-          # Export the filename so the next step can use it
-          echo "file=$FILENAME" >> $GITHUB_OUTPUT
+          echo "file=$FILENAME" >> "$GITHUB_OUTPUT"
 
-      - name: 📤 Attach to Existing Release
+      - name: 📤 Attach Artifact To Release
         uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.event.client_payload.metadata.githubTagName }}
           files: ${{ steps.download.outputs.file }}
           append_body: true
-          draft: false # Publish the release once the first artifact hits
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
