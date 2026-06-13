@@ -2,7 +2,7 @@
   "expo": {
     "name": "ArtLens",
     "slug": "artlens",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "runtimeVersion": {
       "policy": "fingerprint"
     },
@@ -11,12 +11,21 @@
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "artlens",
-    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.artlens.artlens",
+      "associatedDomains": [],
+      "entitlements": {
+        "com.apple.developer.backgroundmodes": true
+      },
       "infoPlist": {
-        "NSCameraUsageDescription": "$(PRODUCT_NAME) needs access to your Camera."
+        "NSCameraUsageDescription": "$(PRODUCT_NAME) needs access to your Camera",
+        "NSPhotoLibraryUsageDescription": "$(PRODUCT_NAME) needs access to your Photos",
+        "NSPhotoLibraryAddUsageDescription": "$(PRODUCT_NAME) needs permission to save your stylized images",
+        "UIBackgroundModes": ["processing", "fetch"],
+        "BGTaskSchedulerPermittedIdentifiers": [
+          "com.artlens.artlens.stylization"
+        ]
       }
     },
     "android": {
@@ -57,22 +66,8 @@
         }
       ],
       "expo-font",
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "minSdkVersion": 29,
-            "maxSdkVersion": 36,
-            "compileSdkVersion": 36,
-            "targetSdkVersion": 36,
-            "enableShrinkResourcesInReleaseBuilds": true,
-            "enableMinifyInReleaseBuilds": true,
-            "enableProguardInReleaseBuilds": true,
-            "proguardRuleFiles": ["proguard-rules.pro"],
-            "buildArchs": ["arm64-v8a"]
-          }
-        }
-      ],
+      "expo-image",
+      "expo-media-library",
       [
         "expo-image-picker",
         {
@@ -97,15 +92,6 @@
         }
       ],
       [
-        "react-native-fast-tflite",
-        {
-          "enableAndroidGpuLibraries": ["libOpenCL.so", "libGLES_mali.so"]
-        }
-      ],
-      "expo-image",
-      "expo-web-browser",
-      "expo-media-library",
-      [
         "expo-share-intent",
         {
           "androidIntentFilters": ["image/*"]
@@ -118,6 +104,33 @@
             "enabled": true
           }
         }
+      ],
+
+      [
+        "react-native-fast-tflite",
+        {
+          "enableAndroidGpuLibraries": ["libOpenCL.so", "libGLES_mali.so"]
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "largeHeap": true,
+            "minSdkVersion": 29,
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "jvmMaxHeapSize": "2048m",
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "enableMinifyInReleaseBuilds": true,
+            "enableProguardInReleaseBuilds": true,
+            "proguardRuleFiles": ["proguard-rules.pro"],
+            "buildArchs": ["arm64-v8a"],
+            "packagingOptions": {
+              "pickFirst": ["**/libnetf.so"]
+            }
+          }
+        }
       ]
     ],
     "experiments": {
@@ -127,7 +140,10 @@
     "owner": "artlens-app",
     "updates": {
       "url": "https://u.expo.dev/433dbeee-4ca0-4942-89ca-96aa94eea86f",
-      "enableBsdiffPatchSupport": true
+      "enableBsdiffPatchSupport": true,
+      "enabled": true,
+      "fallbackToCacheTimeout": 30000,
+      "checkAutomatically": "ON_LOAD"
     },
     "extra": {
       "router": {},
