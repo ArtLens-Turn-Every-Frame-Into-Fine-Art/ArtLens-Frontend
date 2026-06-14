@@ -18,11 +18,11 @@ jobs:
       - name: 🏗 Checkout repository
         uses: actions/checkout@v6
 
-      - name: 📚 Setup Node
+      - name: 📚 Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: 'npm'
+          cache: "npm"
 
       - name: 🚀 Setup Expo & EAS
         uses: expo/expo-github-action@v8
@@ -35,14 +35,19 @@ jobs:
 
       # Second gate: re-confirm the build is healthy by publishing OTA to
       # production. If this fails, nothing below (builds, release) runs.
+
       - name: ☁️ Publish OTA Update
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
-        run: eas update --branch production --message "$COMMIT_MSG"
+        run: |
+          eas update \
+            --branch production \
+            --message "$COMMIT_MSG"
 
       # softprops/action-gh-release creates the tag automatically since
       # v${{ github.run_number }} doesn't exist yet — no separate
       # "create git tag" step needed.
+
       - name: 📝 Create Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
