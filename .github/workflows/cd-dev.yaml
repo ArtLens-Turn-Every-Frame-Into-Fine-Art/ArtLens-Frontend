@@ -19,7 +19,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: 'npm'
+          cache: "npm"
 
       - name: 🚀 Setup Expo & EAS
         uses: expo/expo-github-action@v8
@@ -31,6 +31,10 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
-      # SHIP OTA UPDATE (Instant update for existing users)
+      # This OTA publish doubles as the build-health gate: if `eas update`
+      # fails here, the JS bundle wouldn't ship to production either, so
+      # there's no point promoting this commit to main.
       - name: ☁️ Publish OTA Update
-        run: eas update --branch development --message "${{ github.event.head_commit.message }}"
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: eas update --branch development --message "$COMMIT_MSG"

@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write # Required for creating GitHub Releases
+  contents: write # Required to create the GitHub Release (and its tag)
 
 jobs:
   production-ship:
@@ -18,11 +18,11 @@ jobs:
       - name: 🏗 Checkout repository
         uses: actions/checkout@v6
 
-      - name: 📚 Setup Node.js
+      - name: 📚 Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
+          cache: "npm"
 
       - name: 🚀 Setup Expo & EAS
         uses: expo/expo-github-action@v8
@@ -33,14 +33,16 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
+      # Second gate: re-confirm the build is healthy by publishing OTA to
+      # production. If this fails, nothing below (builds, release) runs.
       - name: ☁️ Publish OTA Update
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
-        run: |
-          eas update \
-            --branch production \
-            --message "$COMMIT_MSG"
+        run: eas update --branch production --message "$COMMIT_MSG"
 
+      # softprops/action-gh-release creates the tag automatically since
+      # v${{ github.run_number }} doesn't exist yet — no separate
+      # "create git tag" step needed.
       - name: 📝 Create Draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -67,8 +69,7 @@ jobs:
             --profile production \
             --non-interactive \
             --no-wait \
-            --message "Release v${{ github.run_number }}" \
-            --metadata '{"githubTagName":"v${{ github.run_number }}"}'
+            --message "Release v${{ github.run_number }} [platform:android] [tag:v${{ github.run_number }}]"
 
       # - name: 🍎 Trigger iOS Production Build
       #   run: |
@@ -77,5 +78,4 @@ jobs:
       #       --profile production \
       #       --non-interactive \
       #       --no-wait \
-      #       --message "Release v${{ github.run_number }}" \
-      #       --metadata '{"githubTagName":"v${{ github.run_number }}"}'
+      #       --message "Release v${{ github.run_number }} [platform:ios] [tag:v${{ github.run_number }}]"
