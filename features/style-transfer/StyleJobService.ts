@@ -92,10 +92,10 @@ import {
 	getModelConfig,
 } from '@/core/storage/ModelManager'
 import {
-	runTiledInference,
-	runPreviewInference,
+	runCoarseToFineInference,
+	runCoarseToFinePreviewInference,
 	InferenceAbortError,
-} from '@/core/inference/TiledInferenceRunner'
+} from '@/core/inference/CoarseToFineRunner'
 import type { JobId, StyleId } from '@/types'
 
 import { createTracker } from '@/shared/utils/logger'
@@ -307,7 +307,7 @@ export const StyleJobService = {
 					// 'main' synchronously before its first internal await.
 					await InferenceEngine.loadPreviewModel(modelPath, config)
 
-					const result = await runPreviewInference(
+					const result = await runCoarseToFinePreviewInference(
 						nextJob.sourceUri,
 						nextJob.styleId,
 						{
@@ -378,7 +378,7 @@ export const StyleJobService = {
 					//
 					// R (tile resolution) is read from InferenceEngine.getActiveModelConfig('main')
 					// by TiledInferenceRunner — supplied via the config object passed to loadMainModel.
-					const result = await runTiledInference(
+					const result = await runCoarseToFineInference(
 						nextJob.sourceUri,
 						nextJob.styleId,
 						{

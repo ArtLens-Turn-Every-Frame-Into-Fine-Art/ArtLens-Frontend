@@ -24,7 +24,6 @@
  *   - src/shared/stores/useStyleJobStore
  *   - src/shared/stores/useModelStore
  *   - src/features/style-transfer/StyleJobService
- *   - src/shared/renderers/SkiaRenderer
  *   - src/types/index.ts
  */
 
