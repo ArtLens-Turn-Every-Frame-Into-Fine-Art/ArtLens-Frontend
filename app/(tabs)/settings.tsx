@@ -8,17 +8,12 @@
  *  - Clear Cache row: "Used: X MB" now shows real totalBytes from model footprints
  *    (same totalBytes already computed for Storage Management) — no more hardcoded 124 MB.
  *  - Account row shows total artworks created (from completed jobs count).
- *  - performanceMode / highQuality toggles now persist to useModelStore via a
- *    dedicated setPreferences action (or persisted locally with MMKV when not available).
- *  - "Reset All Settings" destructive row added inside the About section.
- *  - Hardware tier badge styling cleaned up.
  *
  * Directory: app/(tabs)/settings.tsx
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-	//ActivityIndicator,
 	Alert,
 	Platform,
 	Pressable,
@@ -33,17 +28,12 @@ import { router } from 'expo-router'
 import {
 	Check,
 	ChevronRight,
-	CloudOff,
-	//Cpu,
 	FileImage,
 	HardDrive,
 	Images,
-	//Info,
 	MessageCircle,
-	//RefreshCw,
 	Settings,
 	ShieldCheck,
-	Sparkles,
 	Trash2,
 	Zap,
 	AlertCircle,
@@ -53,17 +43,12 @@ import {
 import { useShallow } from 'zustand/shallow'
 
 import { useModelStore } from '@/shared/stores/useModelStore'
-//import { useHardwareProfileStore } from '@/shared/stores/useHardwareProfileStore'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 
 import {
 	getPhysicalFootprint,
 	deleteStyleAssets,
 } from '@/core/storage/ModelManager'
-import {} from //runFullBenchmark,
-//estimateLiveFPS,
-//HardwareProfile,
-'@/core/hardware/HardwareProfiler'
 
 import type { StyleModel, ExportFormat } from '@/types'
 import { createTracker } from '@/shared/utils/logger'
@@ -107,17 +92,6 @@ function formatBytes(bytes: number): string {
 	if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`
 	return `${(bytes / 1_073_741_824).toFixed(2)} GB`
 }
-
-//function formatRelativeDate(ts: number): string {
-//	const diff = Date.now() - ts
-//	if (diff < 0) return 'just now'
-//	const minutes = Math.floor(diff / 60_000)
-//	if (minutes < 1) return 'just now'
-//	if (minutes < 60) return `${minutes}m ago`
-//	const hours = Math.floor(minutes / 60)
-//	if (hours < 24) return `${hours}h ago`
-//	return `${Math.floor(hours / 24)}d ago`
-//}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION WRAPPER
@@ -347,26 +321,6 @@ const StorageRow = React.memo<StorageRowProps>(
 StorageRow.displayName = 'StorageRow'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HARDWARE TIER BADGE
-// ─────────────────────────────────────────────────────────────────────────────
-
-//const TierBadge: React.FC<{ tier: 1 | 2 }> = ({ tier }) => (
-//	<View style={[styles.tierBadge, tier === 1 && styles.tierBadge1]}>
-//		<Zap
-//			color={tier === 1 ? C.downloaded : C.warning}
-//			size={10}
-//			strokeWidth={2}
-//			fill={tier === 1 ? C.downloaded : C.warning}
-//		/>
-//		<Text
-//			style={[styles.tierBadgeText, tier === 1 && styles.tierBadgeText1]}
-//		>
-//			Tier {tier}
-//		</Text>
-//	</View>
-//)
-
-// ─────────────────────────────────────────────────────────────────────────────
 // TOGGLE ROW
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -480,18 +434,6 @@ export default function SettingsScreen(): React.JSX.Element {
 		[jobs]
 	)
 
-	// ── Toggle states (local) ─────────────────────────────────────────────────
-	const [performanceMode, setPerformanceMode] = useState(true)
-	const [highQuality, setHighQuality] = useState(false)
-	const [offlineUsage, setOfflineUsage] = useState(false)
-
-	// ── Hardware ──────────────────────────────────────────────────────────────
-	//const [profile, setProfile] = useState<HardwareProfile | null>(null)
-	//const isBenchmarking = useHardwareProfileStore((s) => s.isBenchmarking)
-	//const setIsBenchmarking = useHardwareProfileStore(
-	//	(s) => s.setIsBenchmarking
-	//)
-
 	// ── Downloaded models ─────────────────────────────────────────────────────
 	const downloadedModels = useMemo(
 		() => catalog.filter((m) => m.downloadStatus === 'downloaded'),
@@ -515,11 +457,6 @@ export default function SettingsScreen(): React.JSX.Element {
 		}, 0)
 		return () => clearTimeout(timer)
 	}, [downloadedModels])
-
-	//const estimatedFPS = useMemo(
-	//	() => (profile ? estimateLiveFPS(profile) : null),
-	//	[profile]
-	//)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -610,45 +547,6 @@ export default function SettingsScreen(): React.JSX.Element {
 			]
 		)
 	}, [totalBytes, downloadedModels, catalog, setGlobalCatalog])
-
-	//const handleRunBenchmark = useCallback(async () => {
-	//	if (isBenchmarking) return
-	//	Alert.alert(
-	//		'Run Hardware Benchmark',
-	//		"This will test your device's AI capabilities. The app may be briefly unresponsive.",
-	//		[
-	//			{ text: 'Cancel', style: 'cancel' },
-	//			{
-	//				text: 'Run',
-	//				onPress: async () => {
-	//					tracker.log(
-	//						'Launching hardware profiler engine suite baseline check'
-	//					)
-	//					setIsBenchmarking(true)
-	//					try {
-	//						const result = await runFullBenchmark(null)
-	//						tracker.log(
-	//							'Hardware profile evaluation completed',
-	//							{ score: result.benchmarkedAt }
-	//						)
-	//						setProfile(result)
-	//					} catch (err) {
-	//						tracker.error(
-	//							'Hardware profile analysis exception',
-	//							err
-	//						)
-	//						Alert.alert(
-	//							'Benchmark failed',
-	//							'Could not complete hardware test. Please try again.'
-	//						)
-	//					} finally {
-	//						setIsBenchmarking(false)
-	//					}
-	//				},
-	//			},
-	//		]
-	//	)
-	//}, [isBenchmarking, setIsBenchmarking])
 
 	const handleAboutContact = useCallback(() => {
 		router.push('/(screens)/about-contact')
@@ -785,44 +683,8 @@ export default function SettingsScreen(): React.JSX.Element {
 				</Section>
 			)}
 
-			{/* ── Performance & Quality ──────────────────────────────────────── */}
-			<Section title="Performance &amp; Quality">
-				<ToggleRow
-					icon={<Zap color="#FFD60A" size={16} strokeWidth={1.5} />}
-					label="Performance Mode"
-					subtitle="Prioritize speed over detail"
-					value={performanceMode}
-					onValueChange={(v) => {
-						setPerformanceMode(v)
-						tracker.log('Performance mode toggled', { enabled: v })
-					}}
-				/>
-				<ToggleRow
-					icon={
-						<Sparkles color="#FF9F0A" size={16} strokeWidth={1.5} />
-					}
-					label="Ultra Res Output"
-					subtitle="Render in 4K resolution"
-					value={highQuality}
-					onValueChange={(v) => {
-						setHighQuality(v)
-						tracker.log('Ultra res output toggled', { enabled: v })
-					}}
-					noBorder
-				/>
-			</Section>
-
 			{/* ── Data & Storage ─────────────────────────────────────────────── */}
 			<Section title="Data &amp; Storage">
-				<ToggleRow
-					icon={
-						<CloudOff color="#30B0C7" size={16} strokeWidth={1.5} />
-					}
-					label="Offline Mode"
-					subtitle="Process without internet"
-					value={offlineUsage}
-					onValueChange={setOfflineUsage}
-				/>
 				<Row
 					icon={
 						<HardDrive
@@ -920,117 +782,6 @@ export default function SettingsScreen(): React.JSX.Element {
 				)}
 			</Section>
 
-			{/* ── 3. Hardware Profile ───────────────────────────────────────── */}
-			{/*<Section title="Hardware profile">
-				{profile ? (
-					<>
-						<Row
-							icon={
-								<Cpu
-									color={C.textMuted}
-									size={16}
-									strokeWidth={1.5}
-								/>
-							}
-							label="Device tier"
-							right={<TierBadge tier={profile.tier} />}
-						/>
-						<Row
-							icon={
-								<Zap
-									color={C.textMuted}
-									size={16}
-									strokeWidth={1.5}
-								/>
-							}
-							label="Live inference delegate"
-							right={
-								<Text style={styles.delegateText}>
-									{profile.preferredLiveDelegate.toUpperCase()}
-								</Text>
-							}
-						/>
-						<Row
-							icon={
-								<Zap
-									color={C.textMuted}
-									size={16}
-									strokeWidth={1.5}
-								/>
-							}
-							label="Background delegate"
-							right={
-								<Text style={styles.delegateText}>
-									{profile.preferredMainDelegate.toUpperCase()}
-								</Text>
-							}
-						/>
-						{estimatedFPS !== null && (
-							<Row
-								icon={
-									<Zap
-										color={C.textMuted}
-										size={16}
-										strokeWidth={1.5}
-									/>
-								}
-								label="Estimated live FPS"
-								right={
-									<Text style={styles.delegateText}>
-										{estimatedFPS} FPS
-									</Text>
-								}
-							/>
-						)}
-						<Row
-							icon={
-								<Info
-									color={C.textMuted}
-									size={16}
-									strokeWidth={1.5}
-								/>
-							}
-							label="Last benchmarked"
-							right={
-								<Text style={styles.benchmarkDate}>
-									{formatRelativeDate(profile.benchmarkedAt)}
-								</Text>
-							}
-							noBorder
-						/>
-					</>
-				) : (
-					<View style={styles.emptyRow}>
-						<Text style={styles.emptyRowText}>
-							No benchmark data. Run one below.
-						</Text>
-					</View>
-				)}
-
-				<Pressable
-					onPress={handleRunBenchmark}
-					disabled={isBenchmarking}
-					style={[
-						styles.benchmarkButton,
-						isBenchmarking && styles.benchmarkButtonDisabled,
-					]}
-					accessibilityRole="button"
-					accessibilityLabel="Run hardware benchmark"
-					accessibilityState={{ disabled: isBenchmarking }}
-				>
-					{isBenchmarking ? (
-						<ActivityIndicator color={C.white} size="small" />
-					) : (
-						<RefreshCw color={C.white} size={16} strokeWidth={2} />
-					)}
-					<Text style={styles.benchmarkButtonText}>
-						{isBenchmarking
-							? 'Benchmarking…'
-							: 'Run Hardware Benchmark'}
-					</Text>
-				</Pressable>
-			</Section>*/}
-
 			{/* ── 4. About ─────────────────────────────────────────────────── */}
 			<Section title="About">
 				<Row
@@ -1054,35 +805,6 @@ export default function SettingsScreen(): React.JSX.Element {
 					}
 					label="Contact Us"
 					onPress={handleAboutContact}
-				/>
-				<Row
-					icon={
-						<Trash2 color={C.error} size={16} strokeWidth={1.5} />
-					}
-					label="Reset All Settings"
-					danger
-					onPress={() => {
-						Alert.alert(
-							'Reset Settings',
-							'This will restore all settings to their default values.',
-							[
-								{ text: 'Cancel', style: 'cancel' },
-								{
-									text: 'Reset',
-									style: 'destructive',
-									onPress: () => {
-										setPerformanceMode(true)
-										setHighQuality(false)
-										setOfflineUsage(false)
-										tracker.log(
-											'User reset all settings to defaults'
-										)
-									},
-								},
-							]
-						)
-					}}
-					noBorder
 				/>
 			</Section>
 
@@ -1207,40 +929,6 @@ const styles = StyleSheet.create({
 	},
 	totalRow: { backgroundColor: `${C.primary}0D` },
 	totalBytes: { color: C.primary, fontSize: 14, fontWeight: '700' },
-
-	// Hardware
-	tierBadge: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 4,
-		backgroundColor: `${C.warning}15`,
-		borderRadius: 8,
-		paddingHorizontal: 8,
-		paddingVertical: 4,
-	},
-	tierBadge1: { backgroundColor: `${C.downloaded}15` },
-	tierBadgeText: { color: C.warning, fontSize: 12, fontWeight: '700' },
-	tierBadgeText1: { color: C.downloaded },
-	delegateText: {
-		color: C.primaryMid,
-		fontSize: 13,
-		fontWeight: '700',
-		letterSpacing: 0.5,
-	},
-	benchmarkDate: { color: C.textMuted, fontSize: 13 },
-	benchmarkButton: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'center',
-		gap: 8,
-		margin: 12,
-		marginTop: 4,
-		backgroundColor: C.primaryMid,
-		borderRadius: 12,
-		paddingVertical: 12,
-	},
-	benchmarkButtonDisabled: { opacity: 0.6 },
-	benchmarkButtonText: { color: C.white, fontSize: 14, fontWeight: '700' },
 
 	// Queue activity section
 	queueStatsGrid: {

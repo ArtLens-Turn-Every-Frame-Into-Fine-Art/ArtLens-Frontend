@@ -1,26 +1,10 @@
 /**
  * ArtLens — StyleSelection Screen
  *
- * FIX vs original:
- *  - `ModelManager.downloadStylePack()` / `ModelManager.deleteStylePack()` are
- *    named exports, not methods on a namespace object. Corrected to direct imports.
- *  - `model.previewModelUrl`, `model.mainModelUrl`, `model.config` come from
- *    the `StyleModel` type which must carry these fields (they are present in
- *    ModelManifestItem and persisted in MMKV via the registry). The catalog
- *    in useModelStore stores the full manifest item shape.
- *  - `syncManifest(clientHash)` returns `ManifestResponse | null`.
- *    The function signature per the PRD is `syncManifest(clientHash: string)`.
- *    The types/index.ts defines a `ManifestSyncRequest` object type. We pass
- *    the clientHash string directly — if the function signature in api.ts was
- *    changed to accept `ManifestSyncRequest`, we wrap it accordingly.
- *  - `useIncomingImage()` returns `{ pendingImage: PendingImage | null, clearPendingImage: () => void }`.
- *    The original code destructured `{ incomingUri, clearIncoming }` which
- *    don't exist. Fixed to use the actual hook contract.
- *  - `updateCatalog(result.updates)` — `ManifestUpdate` requires `config`.
- *    The API response updates are typed as `ManifestUpdate[]` which includes
- *    `config`. We cast the result appropriately since the backend guarantees
- *    this field is present per Section 8.1 of the PRD.
- *  - Removed unused `formatBytes` helper and `handleApplyIncoming` (ESLint warnings).
+ * Performance-Optimized Edition:
+ * - Converted main ScrollView container to FlatList to prevent DOM thread choking.
+ * - Decoupled handleDownload from the component-scoped catalog hook using Zustand's getState()
+ * to preserve strict React.memo isolation across non-downloading cards.
  */
 
 import React, { useCallback, useMemo, useState } from 'react'
@@ -29,6 +13,7 @@ import {
 	ActivityIndicator,
 	Alert,
 	Dimensions,
+	FlatList,
 	Modal,
 	Platform,
 	Pressable,
@@ -421,9 +406,9 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 			if (activeCategory === 'Downloaded') {
 				matchesCategory = style.downloadStatus === 'downloaded'
 			} else if (activeCategory === 'New') {
-				matchesCategory = !style.isActive // adapt as needed to your data model
+				matchesCategory = !style.isActive
 			} else if (activeCategory === 'Popular') {
-				matchesCategory = true // adapt to your data model popularity flag
+				matchesCategory = true
 			}
 
 			return matchesSearch && matchesCategory
@@ -467,9 +452,11 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 	}, [clientHash, applyManifestUpdate, setClientHash])
 
 	// On-device download execution pipeline
+	// OPTIMIZATION: Bypassed scope catalog reference to retain stable function identity during downloads
 	const handleDownload = useCallback(
 		async (styleId: string) => {
-			const model = catalog.find((m) => m.id === styleId)
+			const currentCatalog = useModelStore.getState().catalog
+			const model = currentCatalog.find((m) => m.id === styleId)
 			if (!model) return
 
 			if (!model.previewModelUrl || !model.mainModelUrl) {
@@ -524,7 +511,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 				)
 			}
 		},
-		[catalog, updateDownloadStatus]
+		[updateDownloadStatus]
 	)
 
 	const handleSelectStyle = useCallback((item: StyleModel) => {
@@ -586,49 +573,10 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 		router.replace('/(tabs)/gallery')
 	}, [sourceUri, selectedStyle, enqueueJob, router])
 
-	//const renderCard: ListRenderItem<StyleModel> = useCallback(
-	//	({ item }) => (
-	//		<StyleGridCard
-	//			item={item}
-	//			isSelected={selectedStyleId === item.id}
-	//			onSelect={handleSelectStyle}
-	//			onDownload={handleDownload}
-	//		/>
-	//	),
-	//	[selectedStyleId, handleSelectStyle, handleDownload]
-	//)
-
-	//const keyExtractor = useCallback((item: StyleModel) => item.id, [])
-
-	return (
-		<View style={styles.container}>
-			<StatusBar barStyle="dark-content" />
-
-			{/* Header */}
-			<View
-				style={[
-					styles.header,
-					{ paddingTop: insets.top > 0 ? insets.top : 16 },
-				]}
-			>
-				<Text style={styles.headerTitle}>Style Explorer</Text>
-			</View>
-
-			<ScrollView
-				showsVerticalScrollIndicator={false}
-				contentContainerStyle={[
-					styles.scrollContent,
-					{ paddingBottom: 10 },
-				]}
-				refreshControl={
-					<RefreshControl
-						refreshing={refreshing}
-						onRefresh={handleRefresh}
-						tintColor={COLORS.primary}
-						colors={[COLORS.primary]}
-					/>
-				}
-			>
+	// ── FlatList Sub-Render Blocks to keep layout frames fully insulated ───────
+	const renderHeader = useMemo(
+		() => (
+			<View style={styles.headerLayoutGap}>
 				<Text style={styles.pageTitle}>Choose Your Style</Text>
 				<Text style={styles.pageSubtitle}>
 					Transform your photos into masterpieces using AI-powered
@@ -668,6 +616,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 					horizontal
 					showsHorizontalScrollIndicator={false}
 					style={styles.categoryScroll}
+					contentContainerStyle={styles.categoryScrollContent}
 				>
 					{CATEGORIES.map((cat) => (
 						<TouchableOpacity
@@ -690,47 +639,97 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 						</TouchableOpacity>
 					))}
 				</ScrollView>
+			</View>
+		),
+		[searchQuery, activeCategory]
+	)
 
-				{/* Styles Grid */}
-				<View style={styles.grid}>
-					{filteredStyles.length > 0 ? (
-						filteredStyles.map((style) => (
-							<StyleGridCard
-								key={style.id}
-								item={style}
-								isSelected={selectedStyleId === style.id}
-								onSelect={handleSelectStyle}
-								onDownload={handleDownload}
-							/>
-						))
-					) : (
-						<View style={styles.emptyState}>
-							<Sparkles color={COLORS.textGray} size={36} />
-							<Text style={styles.emptyStateText}>
-								{searchQuery
-									? `No styles found matching "${searchQuery}"`
-									: 'No styles available. Pull down to sync.'}
-							</Text>
-						</View>
-					)}
+	const renderFooter = useMemo(
+		() => (
+			<View style={styles.faqSection}>
+				<View style={styles.faqHeaderRow}>
+					<HelpCircle size={22} color={COLORS.textMain} />
+					<Text style={styles.faqHeader}>Help &amp; Tips</Text>
 				</View>
+				<FaqItem
+					question="How do I download a new style?"
+					answer="Tap on any style. If it's not in your library, the download will begin automatically."
+				/>
+				<FaqItem
+					question="Can I combine styles?"
+					answer="Currently, ArtLens applies one primary style per image for the best resolution results."
+				/>
+			</View>
+		),
+		[]
+	)
 
-				{/* FAQ Section */}
-				<View style={styles.faqSection}>
-					<View style={styles.faqHeaderRow}>
-						<HelpCircle size={22} color={COLORS.textMain} />
-						<Text style={styles.faqHeader}>Help &amp; Tips</Text>
-					</View>
-					<FaqItem
-						question="How do I download a new style?"
-						answer="Tap on any style. If it's not in your library, the download will begin automatically."
+	const renderCard = useCallback(
+		({ item }: { item: StyleModel }) => (
+			<StyleGridCard
+				item={item}
+				isSelected={selectedStyleId === item.id}
+				onSelect={handleSelectStyle}
+				onDownload={handleDownload}
+			/>
+		),
+		[selectedStyleId, handleSelectStyle, handleDownload]
+	)
+
+	const renderEmptyGrid = useMemo(
+		() => (
+			<View style={styles.emptyState}>
+				<Sparkles color={COLORS.textGray} size={36} />
+				<Text style={styles.emptyStateText}>
+					{searchQuery
+						? `No styles found matching "${searchQuery}"`
+						: 'No styles available. Pull down to sync.'}
+				</Text>
+			</View>
+		),
+		[searchQuery]
+	)
+
+	return (
+		<View style={styles.container}>
+			<StatusBar barStyle="dark-content" />
+
+			{/* Header */}
+			<View
+				style={[
+					styles.header,
+					{ paddingTop: insets.top > 0 ? insets.top : 16 },
+				]}
+			>
+				<Text style={styles.headerTitle}>Style Explorer</Text>
+			</View>
+
+			<FlatList
+				data={filteredStyles}
+				renderItem={renderCard}
+				keyExtractor={(item) => item.id}
+				numColumns={2}
+				columnWrapperStyle={
+					filteredStyles.length > 0 ? styles.columnWrapper : undefined
+				}
+				contentContainerStyle={styles.scrollContent}
+				ListHeaderComponent={renderHeader}
+				ListFooterComponent={renderFooter}
+				ListEmptyComponent={renderEmptyGrid}
+				showsVerticalScrollIndicator={false}
+				initialNumToRender={6}
+				maxToRenderPerBatch={10}
+				windowSize={5}
+				removeClippedSubviews={Platform.OS === 'android'}
+				refreshControl={
+					<RefreshControl
+						refreshing={refreshing}
+						onRefresh={handleRefresh}
+						tintColor={COLORS.primary}
+						colors={[COLORS.primary]}
 					/>
-					<FaqItem
-						question="Can I combine styles?"
-						answer="Currently, ArtLens applies one primary style per image for the best resolution results."
-					/>
-				</View>
-			</ScrollView>
+				}
+			/>
 
 			{/* Action Bar — shown when a style is selected and sourceUri is present */}
 			{sourceUri && selectedStyle && (
@@ -803,10 +802,10 @@ const styles = StyleSheet.create({
 		color: COLORS.textMain,
 		top: 4,
 	},
-	headerRightPlaceholder: { width: 40 },
 
 	// ── Scroll ─────────────────────────────────────────────────────────────────
-	scrollContent: { padding: H_PADDING, paddingBottom: 40 },
+	scrollContent: { padding: H_PADDING, paddingBottom: 100 },
+	headerLayoutGap: { marginBottom: 4 },
 
 	// ── Page intro ─────────────────────────────────────────────────────────────
 	pageTitle: {
@@ -853,7 +852,8 @@ const styles = StyleSheet.create({
 	},
 
 	// ── Category Pills ─────────────────────────────────────────────────────────
-	categoryScroll: { marginBottom: 24 },
+	categoryScroll: { marginBottom: 12 },
+	categoryScrollContent: { paddingRight: 20 },
 	pill: {
 		paddingHorizontal: 18,
 		paddingVertical: 10,
@@ -866,9 +866,7 @@ const styles = StyleSheet.create({
 	activePillText: { color: '#FFF' },
 
 	// ── Grid ───────────────────────────────────────────────────────────────────
-	grid: {
-		flexDirection: 'row',
-		flexWrap: 'wrap',
+	columnWrapper: {
 		justifyContent: 'space-between',
 	},
 	styleCard: {
@@ -959,8 +957,8 @@ const styles = StyleSheet.create({
 
 	// ── FAQ ────────────────────────────────────────────────────────────────────
 	faqSection: {
-		marginTop: 20,
-		paddingTop: 30,
+		marginTop: 10,
+		paddingTop: 24,
 		borderTopWidth: 1,
 		borderTopColor: COLORS.border,
 	},

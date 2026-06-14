@@ -17,6 +17,8 @@ import {
 	StyleSheet,
 	Text,
 	View,
+	Platform,
+	StatusBar,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router, useFocusEffect } from 'expo-router'
@@ -152,9 +154,23 @@ export default function CameraScreen(): React.JSX.Element {
 		useCallback(() => {
 			tracker.log('Screen focused, waking up camera hardware stream')
 			setIsCameraActive(true)
+
+			// Force system bar hidden behavior when camera opens
+			StatusBar.setHidden(true, 'fade')
+
 			return () => {
 				tracker.log('Screen unfocused, pausing camera hardware stream')
 				setIsCameraActive(false)
+
+				// CLEANUP: Force Android window out of immersive/fullscreen state immediately
+				StatusBar.setHidden(false, 'fade')
+				StatusBar.setBarStyle('dark-content', true)
+
+				if (Platform.OS === 'android') {
+					StatusBar.setTranslucent(false)
+					// Paint the bar back to white to immediately overwrite frozen pixels/black blocks
+					StatusBar.setBackgroundColor('#FFFFFF')
+				}
 			}
 		}, [])
 	)

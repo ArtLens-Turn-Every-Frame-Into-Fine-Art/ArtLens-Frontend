@@ -96,22 +96,6 @@ const TEAM = [
 	},
 ] as const
 
-// — Stat box component ————————————————————————————————————————————————————————
-interface StatBoxProps {
-	icon: React.ReactNode
-	value: string
-	label: string
-}
-
-const StatBox = React.memo<StatBoxProps>(({ icon, value, label }) => (
-	<View style={styles.statBox}>
-		<View style={styles.statIcon}>{icon}</View>
-		<Text style={styles.statValue}>{value}</Text>
-		<Text style={styles.statLabel}>{label}</Text>
-	</View>
-))
-StatBox.displayName = 'StatBox'
-
 // — Team member card ——————————————————————————————————————————————————————————
 interface TeamMemberProps {
 	name: string
@@ -584,36 +568,6 @@ const styles = StyleSheet.create({
 		fontSize: 14,
 		lineHeight: 21,
 	},
-
-	// Stats
-	statsRow: {
-		flexDirection: 'row',
-		gap: 10,
-		marginBottom: 20,
-	},
-	statBox: {
-		flex: 1,
-		backgroundColor: C.surface,
-		borderRadius: 16,
-		borderWidth: 1,
-		borderColor: C.border,
-		padding: 14,
-		alignItems: 'center',
-		gap: 6,
-	},
-	statIcon: {},
-	statValue: {
-		color: C.text,
-		fontSize: 20,
-		fontWeight: '800',
-		letterSpacing: -0.5,
-	},
-	statLabel: {
-		color: C.textMuted,
-		fontSize: 11,
-		fontWeight: '600',
-	},
-
 	// Divider
 	divider: {
 		height: StyleSheet.hairlineWidth,
@@ -764,16 +718,6 @@ const styles = StyleSheet.create({
 		paddingTop: 24,
 		paddingBottom: 8,
 		gap: 6,
-	},
-	awardRow: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 5,
-	},
-	footerText: {
-		color: C.textMuted,
-		fontSize: 12,
-		fontWeight: '600',
 	},
 	footerSub: {
 		color: C.textDim,

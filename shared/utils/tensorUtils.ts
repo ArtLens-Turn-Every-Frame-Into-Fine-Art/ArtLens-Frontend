@@ -795,7 +795,7 @@ export function stitchTiles(
 		throw new Error(
 			`[tensorUtils] stitchTiles: ${imageW}×${imageH} (${totalPixels}px) ` +
 				`exceeds stitch buffer capacity (${STITCH_MAX_PIXELS}px). ` +
-				`Source image must be ≤ 4085×3065 px.`
+				`Source image must be ≤ 7900×4500 px.`
 		)
 	}
 

@@ -6,11 +6,8 @@
  * @see PRD § 5 — Directory: src/shared/utils/constants.ts
  */
 
-import { Dimensions } from 'react-native'
 import type { ModelConfig } from '@/types'
 import type { TensorflowModelDelegate } from 'react-native-fast-tflite'
-
-const { width, height } = Dimensions.get('window')
 
 // ============================================================================
 // 1. APPLICATION CORE METADATA
@@ -18,7 +15,7 @@ const { width, height } = Dimensions.get('window')
 
 export const APP_INFO = {
 	name: 'ArtLens',
-	version: '2.4.0',
+	version: '1.5.0',
 	buildNumber: '1024',
 	/** @deprecated alias for buildNumber — retained for legacy callers */
 	build: '1024',
@@ -46,13 +43,6 @@ export const COLORS = {
 	cardBg: '#FBFBFF',
 	success: '#4CD964',
 	warning: '#FF9500',
-} as const
-
-export const LAYOUT = {
-	window: { width, height },
-	isSmallDevice: width < 375,
-	padding: 20,
-	borderRadius: 15,
 } as const
 
 // ============================================================================
@@ -91,21 +81,7 @@ export const INFERENCE_DELEGATES: {
 } as const
 
 // ============================================================================
-// 4. CACHE & STORAGE POLICIES
-// ============================================================================
-
-export const STORAGE_KEYS = {
-	THUMBNAIL_PREFIX: 'thumb_meta:',
-	MODEL_REGISTRY_PREFIX: 'model_meta:',
-} as const
-
-export const CACHE_POLICIES = {
-	THUMB_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000, // 7 Days
-	MAX_TOTAL_FOOTPRINT_BYTES: 500 * 1024 * 1024, // 500 MB
-} as const
-
-// ============================================================================
-// 5. STYLE MODEL SAFETY FALLBACKS & PREPROCESSING
+// 4. STYLE MODEL SAFETY FALLBACKS & PREPROCESSING
 // ============================================================================
 
 /**
@@ -163,7 +139,7 @@ export const GAUSSIAN_FLOOR_EPSILON = 1e-6 as const
  * SkiaRenderer.createCompositeSurfaceSnapshot().
  * Range [1, 100]. 90 preserves impasto texture without excessive file size.
  */
-export const OUTPUT_JPEG_QUALITY = 90 as const
+export const OUTPUT_JPEG_QUALITY = 100 as const
 
 /**
  * Manifest cache schema version.
@@ -201,5 +177,5 @@ export const SYSTEM_BOUNDS = {
 
 export const PERFORMANCE_LIMITS = {
 	/** Max ~12.5 Megapixel canvas threshold for the stitch accumulator */
-	STITCH_MAX_PIXELS: 4085 * 3065,
+	STITCH_MAX_PIXELS: 7900 * 4500, // ≈ 12.5 MP
 } as const

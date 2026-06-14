@@ -91,40 +91,6 @@ const { width: SCREEN_W } = Dimensions.get('window')
 const THUMB_H = 220
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QUALITY SELECTOR
-// ─────────────────────────────────────────────────────────────────────────────
-
-type Quality = 'standard' | 'high' | 'ultra'
-
-interface QualityDef {
-	id: Quality
-	label: string
-	sub: string
-	estimate: string
-}
-
-//const QUALITY_OPTIONS: QualityDef[] = [
-//	{
-//		id: 'standard',
-//		label: 'Standard',
-//		sub: 'Fastest export, great for DMs',
-//		estimate: '2.4 MB',
-//	},
-//	{
-//		id: 'high',
-//		label: 'High Definition',
-//		sub: 'Optimized for Social Media',
-//		estimate: '5.8 MB',
-//	},
-//	{
-//		id: 'ultra',
-//		label: 'Ultra 4K',
-//		sub: 'Lossless — best for printing',
-//		estimate: '14.2 MB',
-//	},
-//]
-
-// ─────────────────────────────────────────────────────────────────────────────
 // SOCIAL SHARE TARGETS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -216,16 +182,6 @@ function openAppSettings(): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SPARKLES DECORATOR — restored from old UI
-// ─────────────────────────────────────────────────────────────────────────────
-
-//const SparklesIcon = ({ color, size }: { color: string; size: number }) => (
-//	<View style={{ marginLeft: 6 }}>
-//		<Text style={{ color, fontSize: size }}>✦</Text>
-//	</View>
-//)
-
-// ─────────────────────────────────────────────────────────────────────────────
 // SOCIAL CARD — old-style 4-column icon card (memoized)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -271,76 +227,6 @@ const SocialCard = React.memo<SocialCardProps>(
 	}
 )
 SocialCard.displayName = 'SocialCard'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// QUALITY CARD — old-style (memoized)
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface QualityCardProps {
-	opt: QualityDef
-	selected: boolean
-	onSelect: (id: Quality) => void
-}
-
-const QualityCard = React.memo<QualityCardProps>(
-	({ opt, selected, onSelect }) => {
-		const handlePress = useCallback(
-			() => onSelect(opt.id),
-			[opt.id, onSelect]
-		)
-		return (
-			<Pressable
-				onPress={handlePress}
-				style={({ pressed }) => [
-					styles.qualityCard,
-					selected && styles.activeQualityCard,
-					pressed && !selected && { opacity: 0.8 },
-				]}
-				accessibilityRole="radio"
-				accessibilityState={{ checked: selected }}
-				accessibilityLabel={`${opt.label} quality, ${opt.estimate}`}
-			>
-				<View style={styles.qualityTextGroup}>
-					<View style={styles.titleRow}>
-						<Text
-							style={[
-								styles.qualityTitle,
-								selected && { color: PRIMARY_PURPLE },
-							]}
-						>
-							{opt.label}
-						</Text>
-						<View
-							style={[
-								styles.sizeBadge,
-								selected && styles.activeSizeBadge,
-							]}
-						>
-							<Text
-								style={[
-									styles.qualitySize,
-									selected && { color: C.white },
-								]}
-							>
-								{opt.estimate}
-							</Text>
-						</View>
-					</View>
-					<Text style={styles.qualitySubtitle}>{opt.sub}</Text>
-				</View>
-				<View
-					style={[
-						styles.radioOuter,
-						selected && styles.radioOuterActive,
-					]}
-				>
-					{selected && <View style={styles.radioInner} />}
-				</View>
-			</Pressable>
-		)
-	}
-)
-QualityCard.displayName = 'QualityCard'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
@@ -910,77 +796,12 @@ const styles = StyleSheet.create({
 	},
 
 	// ── Section labels ────────────────────────────────────────────────────────
-	sectionHeaderRow: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		marginBottom: 15,
-	},
 	sectionLabel: {
 		fontSize: 12,
 		fontWeight: '800',
 		color: C.textDim,
 		letterSpacing: 1,
 		textTransform: 'uppercase',
-	},
-
-	// ── Quality cards — old metrics ───────────────────────────────────────────
-	qualityCard: {
-		backgroundColor: C.surface,
-		borderRadius: 20,
-		padding: 20,
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'space-between',
-		marginBottom: 12,
-		borderWidth: 1.5,
-		borderColor: 'transparent',
-	},
-	activeQualityCard: {
-		borderColor: PRIMARY_PURPLE,
-		backgroundColor: C.bg,
-		...Platform.select({
-			ios: {
-				shadowColor: PRIMARY_PURPLE,
-				shadowOffset: { width: 0, height: 8 },
-				shadowOpacity: 0.15,
-				shadowRadius: 12,
-			},
-			android: { elevation: 4 },
-		}),
-	},
-	qualityTextGroup: { flex: 1 },
-	titleRow: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 10,
-		marginBottom: 4,
-	},
-	qualityTitle: { fontSize: 17, fontWeight: '800', color: C.text },
-	sizeBadge: {
-		backgroundColor: '#E5E5EA',
-		paddingHorizontal: 8,
-		paddingVertical: 2,
-		borderRadius: 6,
-	},
-	activeSizeBadge: { backgroundColor: PRIMARY_PURPLE },
-	qualitySize: { fontSize: 11, fontWeight: '700', color: C.textMuted },
-	qualitySubtitle: { fontSize: 13, color: C.textMuted },
-	radioOuter: {
-		width: 24,
-		height: 24,
-		borderRadius: 12,
-		borderWidth: 2,
-		borderColor: '#D1D1D6',
-		justifyContent: 'center',
-		alignItems: 'center',
-		marginLeft: 15,
-	},
-	radioOuterActive: { borderColor: PRIMARY_PURPLE },
-	radioInner: {
-		width: 12,
-		height: 12,
-		borderRadius: 6,
-		backgroundColor: PRIMARY_PURPLE,
 	},
 
 	// ── Share grid — old 4-column ─────────────────────────────────────────────

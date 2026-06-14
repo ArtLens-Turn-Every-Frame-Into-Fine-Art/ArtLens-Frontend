@@ -33,16 +33,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router } from 'expo-router'
 import { Image } from 'expo-image'
-import Animated, {
-	useSharedValue,
-	useAnimatedStyle,
-	withRepeat,
-	withTiming,
-	Easing,
-	FadeIn,
-	FadeInDown,
-	FadeInUp,
-} from 'react-native-reanimated'
+import Animated, { FadeIn, FadeInDown, FadeInUp } from 'react-native-reanimated'
 import {
 	AlertCircle,
 	Battery,
@@ -80,7 +71,7 @@ const C = {
 	surfaceHigh: '#F2F2F7',
 	border: '#F2F2F7',
 	primary: '#7B61FF',
-	primaryMid: '#7B61FF',
+	primaryMid: '#6366F1',
 	primaryGlow: '#A291FF',
 	primarySoft: '#F0EDFF',
 	text: '#1C1C1E',
@@ -130,7 +121,7 @@ interface StatusConfig {
 
 const STATUS_CONFIG: Record<JobStatus, StatusConfig> = {
 	QUEUED: { label: 'Queued', color: C.textMuted, Icon: Clock },
-	PROCESSING: { label: 'Working…', color: C.primaryMid, Icon: Zap },
+	PROCESSING: { label: 'Working…', color: C.primary, Icon: Zap },
 	DONE: { label: 'Done', color: C.downloaded, Icon: CheckCircle2 },
 	ERROR: { label: 'Failed', color: C.error, Icon: AlertCircle },
 	BATTERY_PAUSED: { label: 'Paused', color: C.warning, Icon: Battery },
@@ -148,25 +139,14 @@ type SortMode = 'newest' | 'oldest' | 'name'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ProcessingRing = React.memo<{ progress: number }>(({ progress }) => {
-	const rotation = useSharedValue(0)
-
-	useEffect(() => {
-		rotation.value = withRepeat(
-			withTiming(360, { duration: 1200, easing: Easing.linear }),
-			-1,
-			false
-		)
-	}, [rotation])
-
-	const spinningStyle = useAnimatedStyle(() => ({
-		transform: [{ rotate: `${rotation.value}deg` }],
-	}))
-
 	return (
 		<View style={styles.ringWrapper}>
-			<Animated.View
-				style={[styles.progressRingIndicator, spinningStyle]}
+			<ActivityIndicator
+				color={C.primary}
+				size="large"
+				style={styles.nativeSpinner}
 			/>
+
 			<Text style={styles.ringPercentText}>
 				{Math.round(progress * 100)}%
 			</Text>
@@ -474,7 +454,7 @@ const FinalizedTile = React.memo<FinalizedTileProps>(
 									style={styles.errorOverlayMessage}
 									numberOfLines={2}
 								>
-									{job.errorMessage}
+									Image size or filetype not supported.
 								</Text>
 							)}
 							{job.retryable && (
@@ -659,7 +639,7 @@ const Dropdown = React.memo<DropdownProps>(
 									</Text>
 									{selected === opt.value && (
 										<CheckCircle2
-											color={C.primaryMid}
+											color={C.primary}
 											size={16}
 											strokeWidth={2}
 										/>
@@ -960,7 +940,7 @@ export default function GalleryScreen(): React.JSX.Element {
 						<View style={styles.pageHeader}>
 							<View style={styles.pageHeaderLeft}>
 								<Images
-									color={C.primaryMid}
+									color={C.primary}
 									size={22}
 									strokeWidth={1.6}
 								/>
@@ -970,7 +950,7 @@ export default function GalleryScreen(): React.JSX.Element {
 								{processingCount > 0 && (
 									<View style={styles.processingPill}>
 										<ActivityIndicator
-											color={C.primaryMid}
+											color={C.primary}
 											size="small"
 										/>
 										<Text style={styles.processingPillText}>
@@ -997,7 +977,7 @@ export default function GalleryScreen(): React.JSX.Element {
 								<StatPill
 									label="Active"
 									value={String(processingCount)}
-									accent={C.primaryMid}
+									accent={C.primary}
 								/>
 							)}
 							{errorCount > 0 && (
@@ -1137,7 +1117,7 @@ export default function GalleryScreen(): React.JSX.Element {
 						>
 							<View style={styles.emptyIconWrap}>
 								<Images
-									color={C.primaryMid}
+									color={C.primary}
 									size={40}
 									strokeWidth={1.2}
 								/>
@@ -1239,11 +1219,11 @@ const styles = StyleSheet.create({
 		paddingVertical: 6,
 		borderRadius: 20,
 		borderWidth: 1,
-		borderColor: `${C.primaryMid}30`,
+		borderColor: `${C.primary}30`,
 		gap: 6,
 	},
 	processingPillText: {
-		color: C.primaryMid,
+		color: C.primary,
 		fontSize: 12,
 		fontWeight: '700',
 	},
@@ -1315,7 +1295,7 @@ const styles = StyleSheet.create({
 	dropdownOptionPressed: { backgroundColor: C.surfaceHigh },
 	dropdownOptionSelected: { backgroundColor: C.primarySoft },
 	dropdownOptionText: { color: C.text, fontSize: 15, fontWeight: '500' },
-	dropdownOptionTextSelected: { color: C.primaryMid, fontWeight: '700' },
+	dropdownOptionTextSelected: { color: C.primary, fontWeight: '700' },
 
 	// Section header
 	sectionHeader: {
@@ -1355,7 +1335,7 @@ const styles = StyleSheet.create({
 		elevation: 2,
 		alignItems: 'center',
 	},
-	activeRowPressed: { borderColor: C.primaryMid },
+	activeRowPressed: { borderColor: C.primary },
 	activeRowThumb: {
 		width: 64,
 		height: 64,
@@ -1419,7 +1399,7 @@ const styles = StyleSheet.create({
 	},
 	progressBarFill: {
 		height: '100%',
-		backgroundColor: C.primaryMid,
+		backgroundColor: C.primary,
 		borderRadius: 2,
 	},
 	batteryWarning: { color: C.warning, fontSize: 12, fontWeight: '500' },
@@ -1470,7 +1450,7 @@ const styles = StyleSheet.create({
 	retryButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: C.primaryMid,
+		backgroundColor: C.primary,
 		paddingHorizontal: 10,
 		paddingVertical: 5,
 		borderRadius: 10,
@@ -1519,6 +1499,22 @@ const styles = StyleSheet.create({
 		height: 44,
 		alignItems: 'center',
 		justifyContent: 'center',
+		position: 'relative',
+	},
+	nativeSpinner: {
+		position: 'absolute',
+		top: 0,
+		left: 0,
+		right: 0,
+		bottom: 0,
+		alignItems: 'center',
+		justifyContent: 'center',
+	},
+	ringPercentText: {
+		color: C.text,
+		fontSize: 10,
+		fontWeight: '800',
+		zIndex: 1,
 	},
 	progressRingIndicator: {
 		position: 'absolute',
@@ -1526,10 +1522,9 @@ const styles = StyleSheet.create({
 		height: 36,
 		borderRadius: 18,
 		borderWidth: 3,
-		borderColor: C.primaryMid,
+		borderColor: C.primary,
 		borderTopColor: 'transparent',
 	},
-	ringPercentText: { color: C.text, fontSize: 10, fontWeight: '800' },
 
 	// Empty states
 	emptyState: {
@@ -1563,7 +1558,7 @@ const styles = StyleSheet.create({
 	emptyButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: C.primaryMid,
+		backgroundColor: C.primary,
 		paddingHorizontal: 20,
 		height: 46,
 		borderRadius: 14,
@@ -1585,7 +1580,7 @@ const styles = StyleSheet.create({
 		borderRadius: 10,
 	},
 	clearFilterBtnText: {
-		color: C.primaryMid,
+		color: C.primary,
 		fontWeight: '700',
 		fontSize: 14,
 	},
@@ -1597,7 +1592,7 @@ const styles = StyleSheet.create({
 		paddingBottom: 8,
 	},
 	transformBtn: {
-		backgroundColor: C.primaryMid,
+		backgroundColor: C.primary,
 		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'center',
@@ -1605,7 +1600,7 @@ const styles = StyleSheet.create({
 		borderRadius: 30,
 		marginTop: 20,
 		gap: 8,
-		shadowColor: C.primaryMid,
+		shadowColor: C.primary,
 		shadowOffset: { width: 0, height: 4 },
 		shadowOpacity: 0.3,
 		shadowRadius: 8,

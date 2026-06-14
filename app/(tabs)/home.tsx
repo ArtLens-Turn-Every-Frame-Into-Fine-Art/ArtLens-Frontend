@@ -14,7 +14,7 @@
  * Directory: app/(tabs)/home.tsx
  */
 
-import React, { useCallback, useEffect, useMemo, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo } from 'react'
 import {
 	FlatList,
 	ImageBackground,
@@ -27,7 +27,7 @@ import {
 	type ListRenderItem,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { router, useNavigation } from 'expo-router'
+import { router } from 'expo-router'
 import { Image } from 'expo-image'
 import { LinearGradient } from 'expo-linear-gradient'
 import Animated, {
@@ -335,8 +335,6 @@ RecentCard.displayName = 'RecentCard'
 
 export default function HomeScreen(): React.JSX.Element {
 	const insets = useSafeAreaInsets()
-	const navigation = useNavigation()
-	const scrollRef = useRef<ScrollView>(null)
 
 	const catalog = useModelStore((s) => s.catalog)
 	const setSelectedStyleId = useModelStore((s) => s.setSelectedStyleId)
@@ -397,8 +395,7 @@ export default function HomeScreen(): React.JSX.Element {
 		[catalog]
 	)
 
-	const { pickImage, isPicking, error, clearError } =
-		useImageSelection(navigation)
+	const { pickImage, isPicking, error, clearError } = useImageSelection()
 
 	useEffect(() => {
 		if (error)
@@ -505,7 +502,6 @@ export default function HomeScreen(): React.JSX.Element {
 			</View>
 
 			<ScrollView
-				ref={scrollRef}
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
@@ -567,7 +563,7 @@ export default function HomeScreen(): React.JSX.Element {
 				</View>
 
 				{/* Quick stats strip — only if there's history */}
-				{totalJobs > 0 && (
+				{jobs.length > 0 && (
 					<Animated.View
 						entering={FadeInUp.delay(100).duration(300)}
 						style={styles.statsStrip}
@@ -731,21 +727,6 @@ export default function HomeScreen(): React.JSX.Element {
 		</View>
 	)
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Derived constant used in stats strip
-// ─────────────────────────────────────────────────────────────────────────────
-
-// (totalJobs used inline via jobs.length — JSX closure already has it via useMemo)
-// We expose it through the component closure.
-
-//function useTotalJobs() {
-//	const jobs = useStyleJobStore((s) => s.jobs)
-//	return jobs.length
-//}
-
-// Patch HomeScreen to wire totalJobs (already available via jobs in scope above)
-const totalJobs = 0 // placeholder — actual value from `jobs.length` in component scope
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLES
@@ -1086,9 +1067,3 @@ const styles = StyleSheet.create({
 	},
 	computeMonitorTextPaused: { color: COLORS.warning },
 })
-
-// Re-export with COLORS.warning patched in
-// @ts-ignore — COLORS may not have warning; fallback
-if (!('warning' in COLORS)) {
-	;(COLORS as any).warning = '#FF9F0A'
-}
