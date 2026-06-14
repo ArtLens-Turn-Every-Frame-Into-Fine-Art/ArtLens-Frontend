@@ -15,51 +15,49 @@ jobs:
       github.event.client_payload.status == 'finished' &&
       github.event.client_payload.artifacts.applicationArchiveUrl != ''
 
-    outputs:
-      downloaded_file: ${{ steps.download.outputs.file }}
-
     steps:
+      - name: 🏷 Extract Tag From Build Message
+        id: get-tag
+        env:
+          BUILD_MSG: ${{ github.event.client_payload.message }}
+        run: |
+          TAG=$(echo "$BUILD_MSG" | grep -oE '\[tag:v[0-9]+\]' | sed 's/\[tag://;s/\]//' | head -n 1)
+          if [ -z "$TAG" ]; then
+            echo "Error: Could not extract version tag from EAS message."
+            exit 1
+          fi
+          echo "Found Tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: 📥 Download Build Artifact
         id: download
-        shell: bash
         run: |
           PLATFORM="${{ github.event.client_payload.platform }}"
           DOWNLOAD_URL="${{ github.event.client_payload.artifacts.applicationArchiveUrl }}"
 
-          echo "Platform: $PLATFORM"
+          case "$PLATFORM" in
+            android)
+              FILENAME="ArtLens-android.apk"
+              [[ "$DOWNLOAD_URL" == *apk* ]] || FILENAME="ArtLens-android.aab"
+              ;;
+            ios)
+              FILENAME="ArtLens-ios.ipa"
+              ;;
+            *)
+              echo "Error: Unknown platform '$PLATFORM'"
+              exit 1
+              ;;
+          esac
 
-          if [ "$PLATFORM" = "android" ]; then
-            FILENAME="ArtLens-android"
-            if [[ "$DOWNLOAD_URL" == *.apk* ]]; then
-              FILENAME="${FILENAME}.apk"
-            elif [[ "$DOWNLOAD_URL" == *.aab* ]]; then
-              FILENAME="${FILENAME}.aab"
-            else
-              FILENAME="${FILENAME}.bin"
-            fi
-          elif [ "$PLATFORM" = "ios" ]; then
-            FILENAME="ArtLens-ios.ipa"
-          else
-            echo "Unknown platform: $PLATFORM"
-            exit 1
-          fi
-
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            "$DOWNLOAD_URL" \
-            --output "$FILENAME"
-
+          curl --fail --location --silent --show-error "$DOWNLOAD_URL" --output "$FILENAME"
           echo "file=$FILENAME" >> "$GITHUB_OUTPUT"
 
       - name: 📤 Attach Artifact To Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.client_payload.metadata.githubTagName }}
+          tag_name: ${{ steps.get-tag.outputs.tag }}
           files: ${{ steps.download.outputs.file }}
           append_body: true
-          draft: false
+          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
