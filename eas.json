@@ -11,8 +11,7 @@
       "environment": "production",
       "channel": "production",
       "android": {
-        "buildType": "apk",
-        "largeHeap": true
+        "buildType": "apk"
       }
     }
   },
