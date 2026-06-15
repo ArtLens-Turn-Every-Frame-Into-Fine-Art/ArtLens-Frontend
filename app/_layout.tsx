@@ -6,7 +6,6 @@
  * - Tabs navigator with all 5 tab screens
  * - Camera tab: tab bar hidden for full-screen experience
  * - Font hydration + SplashScreen gating
- * - First-boot hardware benchmark trigger
  */
 
 import React, { useEffect } from 'react'
@@ -24,6 +23,7 @@ import { Home, Images, Camera, Layers, Settings } from 'lucide-react-native'
 import { ContactProvider } from '@/context/ContactContext'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import { StyleJobService } from '@/features/style-transfer/StyleJobService'
+import { useBatteryStore } from '@/shared/stores/useBatteryStore'
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('RootLayout')
@@ -89,11 +89,68 @@ function RootLayoutContent(): React.JSX.Element | null {
 		}
 	}, [ready])
 
+	// ── Battery monitoring lifecycle ──────────────────────────────────────────
+	// Start hardware listeners on mount and tear them down on unmount.
 	useEffect(() => {
-		const initialJobs = useStyleJobStore.getState().jobs
-		const hasQueuedJobs = initialJobs.some((job) => job.status === 'QUEUED')
+		useBatteryStore
+			.getState()
+			.initializeBatteryMonitoring()
+			.catch((err) => {
+				tracker.error(
+					'[RootLayout] Failed to start battery monitoring:',
+					err
+				)
+			})
 
-		if (hasQueuedJobs) {
+		return () => {
+			useBatteryStore.getState().destroyBatteryMonitoring()
+		}
+	}, [])
+
+	// ── Battery recovery → resume paused jobs ─────────────────────────────────
+	// Subscribe to isProcessingFrozen. When it transitions true → false (battery
+	// recovered above critical threshold or power-saver disabled), resume all
+	// BATTERY_PAUSED jobs and restart the queue drain cycle.
+	useEffect(() => {
+		let wasFrozen = useBatteryStore.getState().isProcessingFrozen
+
+		const unsubscribe = useBatteryStore.subscribe((state) => {
+			const isFrozen = state.isProcessingFrozen
+			if (wasFrozen && !isFrozen) {
+				tracker.log(
+					'[RootLayout] Battery recovered — resuming BATTERY_PAUSED jobs.'
+				)
+				StyleJobService.resumeAll()
+			}
+			wasFrozen = isFrozen
+		})
+
+		return () => {
+			unsubscribe()
+		}
+	}, [])
+
+	// ── Startup queue drain (Fixed) ───────────────────────────────────────────
+	useEffect(() => {
+		const { jobs, updateJob } = useStyleJobStore.getState()
+		const isFrozen = useBatteryStore.getState().isProcessingFrozen
+
+		// 1. If battery is healthy on boot, automatically repair historical paused jobs back to standard queue status
+		if (!isFrozen) {
+			jobs.forEach((job) => {
+				if (job.status === 'BATTERY_PAUSED') {
+					updateJob(job.id, { status: 'QUEUED', progress: 0 })
+				}
+			})
+		}
+
+		// 2. Query the live store state again to see if any work needs processing
+		const freshJobs = useStyleJobStore.getState().jobs
+		const hasWorkToProcess = freshJobs.some(
+			(job) => job.status === 'QUEUED' || job.status === 'PREVIEW_QUEUED'
+		)
+
+		if (hasWorkToProcess) {
 			StyleJobService.processNextJobInQueue().catch((error) => {
 				tracker.error(
 					'[RootLayout] Failed to auto-start persistent job queue loop:',

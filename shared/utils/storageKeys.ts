@@ -82,21 +82,6 @@ export const STORAGE_INSTANCE_IDS = {
 } as const
 
 // ============================================================================
-// 3. HARDWARE PROFILER KEYS
-// ============================================================================
-
-/**
- * Storage keys utilized inside the `artlens.hardware` MMKV instance.
- * Managed by `HardwareProfiler.ts` and `useHardwareProfileStore.ts`.
- */
-export const HARDWARE_KEYS = {
-	/** On-disk key for the persisted HardwareProfile benchmark result */
-	PROFILE: 'artlens.hardware.profile.v1',
-	/** On-disk key for the persisted HardwareBenchmarkProfile used by useHardwareProfileStore */
-	BENCHMARK_PROFILE: 'app_config:hardware_benchmark_profile',
-} as const
-
-// ============================================================================
 // 4. THUMBNAIL CACHE WORKSPACE KEYS
 // ============================================================================
 

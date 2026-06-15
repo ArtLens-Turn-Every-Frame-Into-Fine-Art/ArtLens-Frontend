@@ -204,6 +204,8 @@ export const StyleJobService = {
 		if (_processingLock) return
 		_processingLock = true
 
+		let shouldScheduleNext = true
+
 		try {
 			const { jobs, startJob, updateJob, failJob } =
 				useStyleJobStore.getState()
@@ -221,6 +223,7 @@ export const StyleJobService = {
 			const nextJob = nextPreviewJob ?? nextMainJob
 
 			if (!nextJob) {
+				_processingLock = false
 				return
 			}
 
@@ -247,6 +250,7 @@ export const StyleJobService = {
 					`Model asset pack not found for slot "${modelSlot}". ` +
 						'Please download the style pack first.'
 				)
+				_processingLock = false
 				return
 			}
 
@@ -311,7 +315,6 @@ export const StyleJobService = {
 						nextJob.sourceUri,
 						nextJob.styleId,
 						{
-							// FIX 8: Guard against a null _currentJobId before writing progress.
 							onProgress: (fraction: number) => {
 								if (_currentJobId) {
 									updateJob(_currentJobId, {
@@ -459,6 +462,7 @@ export const StyleJobService = {
 					}
 					// Intentional fall-through to inner finally.
 					// unloadModel and _currentJobId = null are handled there exclusively.
+					shouldScheduleNext = false
 				} else {
 					// Genuine pipeline failure: decode error, TFLite crash,
 					// filesystem write failure, Skia encode failure, OOM, etc.
@@ -503,7 +507,9 @@ export const StyleJobService = {
 			// This keeps the queue processing fluidly without requiring external callers
 			// to re-invoke processNextJobInQueue() after each job completes.
 			_processingLock = false
-			setTimeout(() => StyleJobService.processNextJobInQueue(), 0)
+
+			if (shouldScheduleNext)
+				setTimeout(() => StyleJobService.processNextJobInQueue(), 0)
 		}
 	},
 
