@@ -588,7 +588,7 @@ export default function ExportScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: 27 },
+					{ paddingBottom: 21 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>

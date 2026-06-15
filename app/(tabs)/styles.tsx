@@ -712,7 +712,10 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 				columnWrapperStyle={
 					filteredStyles.length > 0 ? styles.columnWrapper : undefined
 				}
-				contentContainerStyle={styles.scrollContent}
+				contentContainerStyle={[
+					styles.scrollContent,
+					{ paddingBottom: 5 },
+				]}
 				ListHeaderComponent={renderHeader}
 				ListFooterComponent={renderFooter}
 				ListEmptyComponent={renderEmptyGrid}

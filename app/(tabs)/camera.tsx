@@ -23,6 +23,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router, useFocusEffect } from 'expo-router'
 import { createTracker } from '@/shared/utils/logger'
+import * as ImagePicker from 'expo-image-picker'
 
 // ── VisionCamera v5 ───────────────────────────────────────────────────────────
 import {
@@ -241,17 +242,17 @@ export default function CameraScreen(): React.JSX.Element {
 
 			const encodedUri = encodeURIComponent(fileUri)
 
-			router.push({
+			router.replace({
 				pathname: '/(screens)/StyleSelectionScreen',
 				params: { sourceUri: encodedUri },
 			})
+			setIsCapturing(false)
 		} catch (err) {
 			tracker.error('Hardware snapshot file compilation layer error', err)
 			Alert.alert(
 				'Capture failed',
 				'Could not save photo. Please try again.'
 			)
-		} finally {
 			setIsCapturing(false)
 		}
 	}, [
@@ -263,8 +264,31 @@ export default function CameraScreen(): React.JSX.Element {
 		captureScale,
 	])
 
-	const handleGoToGallery = useCallback(() => {
-		router.push('/(tabs)/gallery')
+	const handleGoToGallery = useCallback(async () => {
+		try {
+			const result = await ImagePicker.launchImageLibraryAsync({
+				mediaTypes: ImagePicker.MediaTypeOptions.Images,
+				allowsEditing: false,
+				quality: 1,
+			})
+
+			if (!result.canceled && result.assets && result.assets.length > 0) {
+				const selectedUri = result.assets[0].uri
+				const encodedUri = encodeURIComponent(selectedUri)
+
+				router.replace({
+					pathname: '/(screens)/StyleSelectionScreen',
+					params: { sourceUri: encodedUri },
+				})
+			}
+		} catch (err) {
+			tracker.error('Error launching system photo gallery', err)
+			Alert.alert('Error', 'Could not open the photo gallery.')
+		}
+	}, [])
+
+	const handleGoBack = useCallback(() => {
+		router.replace('/(tabs)/home')
 	}, [])
 
 	const FlashIcon = flashMode === 'off' ? ZapOff : Zap
@@ -284,7 +308,7 @@ export default function CameraScreen(): React.JSX.Element {
 			<View style={styles.screen}>
 				<BatteryPausedScreen />
 				<Pressable
-					onPress={() => router.back()}
+					onPress={handleGoBack}
 					style={[
 						styles.topControl,
 						{
@@ -333,19 +357,29 @@ export default function CameraScreen(): React.JSX.Element {
 
 			{/* Top Bar Action Accessory Controllers */}
 			<View style={[styles.topControls, { top: insets.top + 12 }]}>
-				<Pressable
-					onPress={handleToggleFlash}
-					style={[
-						styles.topControl,
-						flashMode !== 'off' && styles.topControlActive,
-					]}
-				>
-					<FlashIcon
-						color={flashMode === 'off' ? C.white : C.warning}
-						size={20}
-						strokeWidth={1.8}
-					/>
-				</Pressable>
+				<View style={styles.topControlsLeftRow}>
+					<Pressable onPress={handleGoBack} style={styles.topControl}>
+						<ChevronLeft
+							color={C.white}
+							size={22}
+							strokeWidth={2}
+						/>
+					</Pressable>
+
+					<Pressable
+						onPress={handleToggleFlash}
+						style={[
+							styles.topControl,
+							flashMode !== 'off' && styles.topControlActive,
+						]}
+					>
+						<FlashIcon
+							color={flashMode === 'off' ? C.white : C.warning}
+							size={20}
+							strokeWidth={1.8}
+						/>
+					</Pressable>
+				</View>
 
 				{batteryLevel <= 20 && (
 					<View style={styles.batteryWarnPill}>
@@ -478,6 +512,11 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		justifyContent: 'space-between',
 		alignItems: 'center',
+	},
+	topControlsLeftRow: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 12,
 	},
 	topControl: {
 		width: CONTROL_SIZE,

@@ -223,7 +223,7 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: insets.bottom + 100 },
+					{ paddingBottom: insets.bottom + 20 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>
@@ -384,12 +384,7 @@ export default function BackgroundGeneratorScreen(): React.JSX.Element {
 			</ScrollView>
 
 			{/* ── Sticky footer ───────────────────────────────────────────────── */}
-			<View
-				style={[
-					styles.footer,
-					{ paddingBottom: Math.max(insets.bottom, 16) },
-				]}
-			>
+			<View style={[styles.footer, { paddingBottom: 10 }]}>
 				<TouchableOpacity
 					style={styles.cancelBtn}
 					onPress={() => router.back()}
