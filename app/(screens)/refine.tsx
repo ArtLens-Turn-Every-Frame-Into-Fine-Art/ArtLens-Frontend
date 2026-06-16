@@ -207,10 +207,7 @@ export default function RefineScreen(): React.JSX.Element {
 				intensity,
 				error: err,
 			})
-			Alert.alert(
-				'Stylise Failed',
-				err instanceof Error ? err.message : 'Could not apply style.'
-			)
+			Alert.alert('Stylise Failed', 'Could not apply style.')
 		} finally {
 			setIsStylising(false)
 		}
@@ -237,12 +234,7 @@ export default function RefineScreen(): React.JSX.Element {
 				intensity,
 				error: err,
 			})
-			Alert.alert(
-				'Export Failed',
-				err instanceof Error
-					? err.message
-					: 'Could not create refined image.'
-			)
+			Alert.alert('Export Failed', 'Could not create refined image.')
 		} finally {
 			setIsExporting(false)
 		}

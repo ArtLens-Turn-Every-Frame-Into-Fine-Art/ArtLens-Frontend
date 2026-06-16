@@ -194,7 +194,7 @@ export default function AboutContactScreen(): React.JSX.Element {
 
 	useEffect(() => {
 		if (error) {
-			Alert.alert('Send Failed', error, [{ text: 'OK', onPress: reset }])
+			Alert.alert('Send Failed', [{ text: 'OK', onPress: reset }])
 		}
 	}, [error, reset])
 

@@ -213,7 +213,7 @@ const StatusOverlay: React.FC<StatusOverlayProps> = React.memo(
 							Stylization failed
 						</Text>
 						<Text style={styles.statusSub}>
-							{job.errorMessage ?? 'An unknown error occurred.'}
+							An unknown error occurred.
 						</Text>
 						{job.retryable && (
 							<Pressable
