@@ -5,6 +5,8 @@
  * - Converted main ScrollView container to FlatList to prevent DOM thread choking.
  * - Decoupled handleDownload from the component-scoped catalog hook using Zustand's getState()
  * to preserve strict React.memo isolation across non-downloading cards.
+ *
+ * * @module app/(tabs)
  */
 
 import React, { useCallback, useMemo, useState } from 'react'
@@ -19,13 +21,13 @@ import {
 	Pressable,
 	RefreshControl,
 	ScrollView,
-	StatusBar,
 	StyleSheet,
 	Text,
 	TextInput,
 	TouchableOpacity,
 	View,
 } from 'react-native'
+import { StatusBar } from 'expo-status-bar'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import {
@@ -692,7 +694,7 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 
 	return (
 		<View style={styles.container}>
-			<StatusBar barStyle="dark-content" />
+			<StatusBar style="dark" />
 
 			{/* Header */}
 			<View
@@ -712,7 +714,10 @@ export default function StyleSelectionScreen(): React.JSX.Element {
 				columnWrapperStyle={
 					filteredStyles.length > 0 ? styles.columnWrapper : undefined
 				}
-				contentContainerStyle={styles.scrollContent}
+				contentContainerStyle={[
+					styles.scrollContent,
+					{ paddingBottom: 5 },
+				]}
 				ListHeaderComponent={renderHeader}
 				ListFooterComponent={renderFooter}
 				ListEmptyComponent={renderEmptyGrid}

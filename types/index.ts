@@ -110,12 +110,6 @@ export interface ModelConfig {
 	preferredColourMode: ColourMode
 }
 
-/** URL pair used by ModelManager.downloadStylePack(). */
-export interface ModelUrls {
-	previewModelUrl: string
-	mainModelUrl: string
-}
-
 /**
  * On-disk registry entry persisted to MMKV by ModelManager.
  * Tracks the fully-hydrated config, file paths, and download lifecycle state.
@@ -202,55 +196,10 @@ export interface JobPayload {
 }
 
 // ============================================================================
-// 4. DEEP FREEZE CHECKPOINTS (Tiling pipeline)
+// 5. INFERENCE ENGINE ARCHITECTURE
 // ============================================================================
 
-export interface TileGridDef {
-	cols: number
-	rows: number
-	total: number
-	step: number
-	tileSize: number
-	overlapFrac: number
-}
-
-/** Serialized to disk when a job is interrupted by low battery. */
-export interface TileCheckpoint {
-	taskId: JobId
-	sourceUri: string
-	targetFormat: ExportFormat
-	styleId: StyleId
-	modelHash: string
-	tileGrid: TileGridDef
-	completedTiles: number[]
-	pendingTiles: number[]
-	/** Base64-encoded PNG of the partially assembled composite canvas. */
-	partialBitmapB64: string
-}
-
-// ============================================================================
-// 5. HARDWARE & INFERENCE ENGINE ARCHITECTURE
-// ============================================================================
-
-export type DelegateType = 'nnapi' | 'android-gpu' | 'core-ml'
 export type ModelSlot = 'preview' | 'main'
-export type TensorShape = [number, number, number, number]
-
-/**
- * Result of a full hardware benchmark run.
- *
- * - **Tier 1:** Live camera loop capable (NPU/GPU available, benchmark ≥ 10 FPS).
- * - **Tier 2:** Static-only mode; live preview disabled, queue-based only.
- */
-export interface HardwareProfile {
-	tier: 1 | 2
-	preferredLiveDelegate: DelegateType
-	preferredMainDelegate: DelegateType
-	/** Optimal CPU thread count for multi-threaded XNNPACK inference. */
-	threadCount: number
-	/** Unix timestamp (ms) when the benchmark was last run. */
-	benchmarkedAt: number
-}
 
 // ============================================================================
 // 6. SYSTEM OS INTEGRATION (Battery & Intent Handlers)

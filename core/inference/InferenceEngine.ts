@@ -380,7 +380,7 @@ export function unloadAllModels(): void {
  * @param config           - Optional hydrated ModelConfig for the mounted style.
  *                           Stored on the slot and returned by getActiveModelConfig().
  * @param delegateOverride - If provided, bypasses _getDefaultDelegates() entirely.
- *                           Useful for hardware benchmark and delegate probe tests.
+ *                           Useful for delegate probe tests.
  */
 export async function loadMainModel(
 	modelPath: string,

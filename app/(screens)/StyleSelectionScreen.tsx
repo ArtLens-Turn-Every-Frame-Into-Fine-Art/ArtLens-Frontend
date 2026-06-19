@@ -25,7 +25,6 @@ import {
 	Text,
 	TouchableOpacity,
 	StyleSheet,
-	StatusBar,
 	Dimensions,
 	ActivityIndicator,
 	Platform,
@@ -34,6 +33,7 @@ import {
 	ScrollView,
 	TextInput,
 } from 'react-native'
+import { StatusBar } from 'expo-status-bar'
 import { Image } from 'expo-image'
 import {
 	ChevronLeft,
@@ -480,7 +480,7 @@ export default function StyleSelectionScreen({
 		)
 		return (
 			<View style={styles.errorFallbackContainer}>
-				<StatusBar barStyle="dark-content" />
+				<StatusBar style="dark" />
 				<AlertCircle size={48} color="#EF4444" strokeWidth={1.5} />
 				<Text style={styles.errorFallbackTitle}>Missing Photo</Text>
 				<Text style={styles.errorFallbackBody}>
@@ -511,7 +511,7 @@ export default function StyleSelectionScreen({
 	// ── Render ─────────────────────────────────────────────────────────────────
 	return (
 		<View style={styles.screen}>
-			<StatusBar barStyle="dark-content" />
+			<StatusBar style="dark" />
 
 			{/* ── Header ── */}
 			<View

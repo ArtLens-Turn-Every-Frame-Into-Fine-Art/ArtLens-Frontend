@@ -439,10 +439,7 @@ export default function ExportScreen(): React.JSX.Element {
 							}
 						: err,
 			})
-			Alert.alert(
-				'Save Failed',
-				err instanceof Error ? err.message : 'Could not save image.'
-			)
+			Alert.alert('Save Failed', 'Could not save image.')
 		} finally {
 			setIsSaving(false)
 		}
@@ -491,12 +488,7 @@ export default function ExportScreen(): React.JSX.Element {
 							}
 						: err,
 			})
-			Alert.alert(
-				'Share Failed',
-				err instanceof Error
-					? err.message
-					: 'Could not open share sheet.'
-			)
+			Alert.alert('Share Failed', 'Could not open share sheet.')
 		} finally {
 			setIsSharing(false)
 		}
@@ -538,12 +530,7 @@ export default function ExportScreen(): React.JSX.Element {
 					jobId,
 					error: err instanceof Error ? err.message : String(err),
 				})
-				Alert.alert(
-					'Share Failed',
-					err instanceof Error
-						? err.message
-						: 'Could not open share sheet.'
-				)
+				Alert.alert('Share Failed', 'Could not open share sheet.')
 			} finally {
 				setSharingSocialId(null)
 			}
@@ -588,7 +575,7 @@ export default function ExportScreen(): React.JSX.Element {
 				showsVerticalScrollIndicator={false}
 				contentContainerStyle={[
 					styles.scrollContent,
-					{ paddingBottom: 27 },
+					{ paddingBottom: 21 },
 				]}
 				keyboardShouldPersistTaps="handled"
 			>
