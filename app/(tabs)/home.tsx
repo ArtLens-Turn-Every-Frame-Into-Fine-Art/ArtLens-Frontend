@@ -12,6 +12,7 @@
  *  - "This Week" stat chip below hero
  *
  * Directory: app/(tabs)/home.tsx
+ * * @module app/(tabs)
  */
 
 import React, { useCallback, useEffect, useMemo } from 'react'
@@ -26,6 +27,7 @@ import {
 	View,
 	type ListRenderItem,
 } from 'react-native'
+import { StatusBar } from 'expo-status-bar'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router } from 'expo-router'
 import { Image } from 'expo-image'
@@ -463,6 +465,7 @@ export default function HomeScreen(): React.JSX.Element {
 
 	return (
 		<View style={styles.container}>
+			<StatusBar style="dark" />
 			{/* Header */}
 			<View style={[styles.header, { paddingTop: insets.top + 4 }]}>
 				<View style={styles.logoRow}>
