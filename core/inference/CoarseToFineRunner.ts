@@ -103,10 +103,11 @@ import * as InferenceEngine from '@/core/inference/InferenceEngine'
 import {
 	prepareInputTensor,
 	getOrAllocateBuffer,
+	alphaBlend,
 } from '@/shared/utils/tensorUtils'
 import { getModelConfig } from '@/core/storage/ModelManager'
 import { createTracker } from '@/shared/utils/logger'
-import type { StyleId } from '@/types'
+import type { StyleId, ColourMode } from '@/types'
 import {
 	OUTPUT_JPEG_QUALITY,
 	PERFORMANCE_LIMITS,
@@ -243,6 +244,65 @@ function _resolveBlendProfile(styleId: StyleId): StyleBlendProfile {
 			`Add this styleId to the pattern table if guide injection is needed.`
 	)
 	return BAROQUE_PROFILE
+}
+
+/**
+ * Resolves a styleId to the colour-treatment strategy for Phase 5.
+ *
+ * 'texture_only' — YCbCr luma substitution (_applyTextureOnlyColour). Keeps the
+ *   ORIGINAL photo's colour and only borrows the model's luminance/texture.
+ *   This exists specifically to fix Van Gogh's tendency to paint large uniform
+ *   areas (sky, walls) a flat saturated blue/cyan — see _applyTextureOnlyColour
+ *   docstring. It is NOT a generic "improve colour" step: applying it to a
+ *   model whose own colour palette IS the style (Baroque) or whose flat
+ *   saturated palette defines the look (AnimeGanV3) actively destroys that
+ *   style by overwriting the model's colour with the source photo's colour.
+ *
+ * 'full_colour' — use the model's raw output colour untouched. Correct default
+ *   for any model whose trained colour grading is part of what makes it look
+ *   right (Baroque, Anime/Cartoonizer).
+ *
+ * 'luminance_blend' — soft RGB alpha blend between original and stylised
+ *   (tensorUtils.alphaBlend) rather than a hard YCbCr swap. Middle ground for
+ *   styles that need some colour grounding but not a full chroma override.
+ *
+ * Until this is exposed per-style from the manifest/ModelManager, resolve it
+ * locally by styleId here — same pattern as _resolveBlendProfile above.
+ */
+function _resolveColourMode(styleId: StyleId): ColourMode {
+	const id = (styleId as string).toLowerCase()
+
+	if (
+		id.includes('vangogh') ||
+		id.includes('van_gogh') ||
+		id.includes('van-gogh') ||
+		id.includes('impasto') ||
+		id.includes('starry') ||
+		id.includes('expressio')
+	) {
+		return 'texture_only'
+	}
+
+	if (
+		id.includes('baroque') ||
+		id.includes('chiaroscuro') ||
+		id.includes('rembrandt') ||
+		id.includes('caravaggio') ||
+		id.includes('vermeer') ||
+		id.includes('anime') ||
+		id.includes('cartoon') ||
+		id.includes('manga') ||
+		id.includes('ink') ||
+		id.includes('sketch')
+	) {
+		return 'full_colour'
+	}
+
+	tracker.warn(
+		`[_resolveColourMode] Unrecognised styleId="${styleId}" — ` +
+			`defaulting to 'full_colour' (trust the model's own output).`
+	)
+	return 'full_colour'
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -571,6 +631,24 @@ function _applyTextureOnlyColour(
 }
 
 /**
+ * Converts an RGBA8 Uint8Array to a packed RGB Float32Array in [0,1],
+ * dropping alpha. Used only by the 'luminance_blend' colour-mode branch to
+ * feed tensorUtils.alphaBlend, which expects two same-shaped [0,1] RGB tensors.
+ */
+function _rgbaU8ToF32Rgb(rgba: Uint8Array, modelDim: number): Float32Array {
+	const pixelCount = modelDim * modelDim
+	const out = new Float32Array(pixelCount * 3)
+	for (let i = 0; i < pixelCount; i++) {
+		const s = i * RGBA_CH
+		const d = i * 3
+		out[d] = rgba[s] / 255
+		out[d + 1] = rgba[s + 1] / 255
+		out[d + 2] = rgba[s + 2] / 255
+	}
+	return out
+}
+
+/**
  * Converts a colour-corrected Float32Array [H×W×3] in [0, 1] to a
  * Uint8Array [H×W×4] (RGBA_8888, alpha=255) for GuidedUpsamplePass.
  *
@@ -783,16 +861,38 @@ async function _runC2FPipeline(
 		const luminanceBlend =
 			InferenceEngine.getActiveModelConfig(slot)?.luminanceBlend ??
 			DEFAULT_MODEL_CONFIG.luminanceBlend
-		const correctedF32 = _applyTextureOnlyColour(
-			stitchedF32,
-			downscaledRgba,
-			inferenceRes,
-			inferenceRes,
-			luminanceBlend
-		)
+		const colourMode = _resolveColourMode(styleId)
+		let correctedF32: Float32Array
+		switch (colourMode) {
+			case 'full_colour':
+				// Trust the model's own trained colour output untouched —
+				// correct for Baroque/Anime, where the palette IS the style.
+				correctedF32 = stitchedF32
+				break
+			case 'luminance_blend':
+				// Soft RGB alpha blend, not a hard YCbCr chroma override.
+				correctedF32 = alphaBlend(
+					_rgbaU8ToF32Rgb(downscaledRgba, inferenceRes),
+					stitchedF32,
+					luminanceBlend
+				)
+				break
+			case 'texture_only':
+			default:
+				// Van Gogh's "everything goes blue" fix — keep original chroma,
+				// borrow only the model's luminance/texture. See docstring above.
+				correctedF32 = _applyTextureOnlyColour(
+					stitchedF32,
+					downscaledRgba,
+					inferenceRes,
+					inferenceRes,
+					luminanceBlend
+				)
+				break
+		}
 		const stylizedRgba = _f32ToRgba(correctedF32, inferenceRes)
 		tracker.log(
-			`Phase 5 done: denorm + colour-correct (luminanceBlend=${luminanceBlend.toFixed(2)}) ` +
+			`Phase 5 done: denorm + colour-correct (mode=${colourMode}, luminanceBlend=${luminanceBlend.toFixed(2)}) ` +
 				`→ RGBA8 ${inferenceRes}²`
 		)
 
