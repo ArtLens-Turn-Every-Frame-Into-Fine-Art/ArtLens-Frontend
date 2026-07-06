@@ -15,7 +15,7 @@ import type { TensorflowModelDelegate } from 'react-native-fast-tflite'
 
 export const APP_INFO = {
 	name: 'ArtLens',
-	version: '1.5.0',
+	version: '1.6.0',
 	buildNumber: '1024',
 	/** @deprecated alias for buildNumber — retained for legacy callers */
 	build: '1024',

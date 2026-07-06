@@ -1,7 +1,7 @@
 {
   "name": "artlens",
   "main": "expo-router/entry",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
@@ -12,8 +12,7 @@
     "graphtree": "node generate_graph_tree.js",
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md,yml,yaml}\"",
     "postinstall": "node -e \"const fs = require('fs'); const path = './node_modules/react-native/tmp'; if (!fs.existsSync(path)) fs.mkdirSync(path, { recursive: true });\"",
-    "test": "jest --forceExit --passWithNoTests",
-    "test:bugcondition": "jest services/__tests__/useIncomingImage.bugCondition.test.ts --forceExit --no-coverage"
+    "test": "jest --forceExit --passWithNoTests"
   },
   "dependencies": {
     "@react-native-community/cli": "^20.1.3",
