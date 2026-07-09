@@ -1,33 +1,24 @@
 /**
- * ArtLens — SettingsScreen (v3 — Enhanced)
+ * ArtLens — SettingsScreen
  *
- * NEW vs v2:
- *  - "Queue Activity" section: shows live counts (queued/processing/done/error)
- *    drawn directly from useStyleJobStore, plus a "Clear Completed" button wired
- *    to clearCompleted() and a "Clear Failed" button wired to removeJob on errors.
- *  - Clear Cache row: "Used: X MB" now shows real totalBytes from model footprints
- *    (same totalBytes already computed for Storage Management) — no more hardcoded 124 MB.
- *  - Account row shows total artworks created (from completed jobs count).
+ * Sections:
+ *  - Queue Activity: live counts + Clear Completed / Clear Failed actions
+ *  - Data & Storage: model cache with real size
+ *  - Default Export Format: format picker
+ *  - Storage Management: per-model delete rows + total
+ *  - About: Privacy Policy + Contact Us
  *
  * Directory: app/(tabs)/settings.tsx
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-	Alert,
-	Platform,
-	Pressable,
-	ScrollView,
-	StyleSheet,
-	Switch,
-	Text,
-	View,
-} from 'react-native'
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { router } from 'expo-router'
 import {
-	Check,
-	ChevronRight,
+	AlertCircle,
+	CheckCircle2,
+	Clock,
 	FileImage,
 	HardDrive,
 	Images,
@@ -36,15 +27,11 @@ import {
 	ShieldCheck,
 	Trash2,
 	Zap,
-	AlertCircle,
-	Clock,
-	CheckCircle2,
 } from 'lucide-react-native'
 import { useShallow } from 'zustand/shallow'
 
 import { useModelStore } from '@/shared/stores/useModelStore'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
-
 import {
 	getPhysicalFootprint,
 	deleteStyleAssets,
@@ -52,34 +39,9 @@ import {
 
 import type { StyleModel, ExportFormat } from '@/types'
 import { createTracker } from '@/shared/utils/logger'
+import { Row, Colors, QueueStat, FormatPicker, Section } from '@/shared/ui'
 
 const tracker = createTracker('SettingsScreen')
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DESIGN TOKENS
-// ─────────────────────────────────────────────────────────────────────────────
-
-const C = {
-	bg: '#F8F9FB',
-	surface: '#FFFFFF',
-	surfaceHigh: '#F2F2F7',
-	border: '#E5E5EA',
-	primary: '#7B61FF',
-	primaryMid: '#7B61FF',
-	primarySoft: '#F0EDFF',
-	text: '#1C1C1E',
-	textMuted: '#8E8E93',
-	textDim: '#AEAEB2',
-	downloaded: '#4CD964',
-	success: '#34C759',
-	warning: '#FF9F0A',
-	warningSoft: '#FFF5E6',
-	error: '#FF7675',
-	errorDeep: '#FF3B30',
-	white: '#FFFFFF',
-} as const
-
-const EXPORT_FORMATS: ExportFormat[] = ['JPEG', 'JPG', 'PNG', 'HEIC', 'HEIF']
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -87,147 +49,14 @@ const EXPORT_FORMATS: ExportFormat[] = ['JPEG', 'JPG', 'PNG', 'HEIC', 'HEIF']
 
 function formatBytes(bytes: number): string {
 	if (bytes <= 0) return '0 B'
-	if (bytes < 1024) return `${bytes} B`
-	if (bytes < 1_048_576) return `${(bytes / 1024).toFixed(1)} KB`
+	if (bytes < 1_024) return `${bytes} B`
+	if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`
 	if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`
 	return `${(bytes / 1_073_741_824).toFixed(2)} GB`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION WRAPPER
-// ─────────────────────────────────────────────────────────────────────────────
-
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({
-	title,
-	children,
-}) => (
-	<View style={styles.section}>
-		<Text style={styles.sectionTitle}>{title}</Text>
-		<View style={styles.sectionCard}>{children}</View>
-	</View>
-)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ROW
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface RowProps {
-	icon: React.ReactNode
-	label: string
-	right?: React.ReactNode
-	onPress?: () => void
-	danger?: boolean
-	noBorder?: boolean
-	subtitle?: string
-}
-
-const Row = React.memo<RowProps>(
-	({ icon, label, right, onPress, danger, noBorder, subtitle }) => {
-		const content = (
-			<>
-				<View style={styles.rowLeft}>
-					<View
-						style={[styles.rowIcon, danger && styles.rowIconDanger]}
-					>
-						{icon}
-					</View>
-					<View style={styles.rowLabelBlock}>
-						<Text
-							style={[
-								styles.rowLabel,
-								danger && styles.rowLabelDanger,
-							]}
-						>
-							{label}
-						</Text>
-						{subtitle && (
-							<Text style={styles.rowSubtitle}>{subtitle}</Text>
-						)}
-					</View>
-				</View>
-				<View style={styles.rowRight}>
-					{right}
-					{onPress && !right && (
-						<ChevronRight
-							color={C.textDim}
-							size={16}
-							strokeWidth={1.5}
-						/>
-					)}
-				</View>
-			</>
-		)
-
-		if (onPress) {
-			return (
-				<Pressable
-					onPress={onPress}
-					style={({ pressed }) => [
-						styles.row,
-						!noBorder && styles.rowBorder,
-						pressed && styles.rowPressed,
-					]}
-					accessibilityRole="button"
-					accessibilityLabel={label}
-				>
-					{content}
-				</Pressable>
-			)
-		}
-
-		return (
-			<View style={[styles.row, !noBorder && styles.rowBorder]}>
-				{content}
-			</View>
-		)
-	}
-)
-Row.displayName = 'Row'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EXPORT FORMAT PICKER
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface FormatPickerProps {
-	selected: ExportFormat
-	onSelect: (f: ExportFormat) => void
-}
-
-const FormatPicker = React.memo<FormatPickerProps>(({ selected, onSelect }) => (
-	<View style={styles.formatPicker}>
-		{EXPORT_FORMATS.map((fmt, i) => (
-			<Pressable
-				key={fmt}
-				onPress={() => onSelect(fmt)}
-				style={[
-					styles.formatChip,
-					selected === fmt && styles.formatChipSelected,
-					i === 0 && styles.formatChipFirst,
-					i === EXPORT_FORMATS.length - 1 && styles.formatChipLast,
-				]}
-				accessibilityRole="radio"
-				accessibilityState={{ checked: selected === fmt }}
-				accessibilityLabel={`${fmt} format`}
-			>
-				{selected === fmt && (
-					<Check color={C.white} size={12} strokeWidth={3} />
-				)}
-				<Text
-					style={[
-						styles.formatChipText,
-						selected === fmt && styles.formatChipTextSelected,
-					]}
-				>
-					{fmt}
-				</Text>
-			</Pressable>
-		))}
-	</View>
-))
-FormatPicker.displayName = 'FormatPicker'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STORAGE ROW
+// STORAGE ROW — per-downloaded-model delete row
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface StorageRowProps {
@@ -238,8 +67,9 @@ interface StorageRowProps {
 
 const StorageRow = React.memo<StorageRowProps>(
 	({ model, catalog, setCatalog }) => {
-		const [sizeBytes, setSizeBytes] = useState<number>(0)
+		const [sizeBytes, setSizeBytes] = useState(0)
 
+		// Defer the filesystem read off the render cycle
 		useEffect(() => {
 			const timer = setTimeout(() => {
 				try {
@@ -263,24 +93,25 @@ const StorageRow = React.memo<StorageRowProps>(
 						onPress: () => {
 							try {
 								deleteStyleAssets(model.id)
-								const updated = catalog.map((m) =>
-									m.id === model.id
-										? {
-												...m,
-												downloadStatus:
-													'not_downloaded' as const,
-											}
-										: m
+								setCatalog(
+									catalog.map((m) =>
+										m.id === model.id
+											? {
+													...m,
+													downloadStatus:
+														'not_downloaded' as const,
+												}
+											: m
+									)
 								)
-								setCatalog(updated)
 							} catch (error: any) {
 								tracker.error(
-									'Physical disk partition eviction fault',
+									'Failed to delete style assets',
 									error
 								)
 								Alert.alert(
 									'Error',
-									'Physical disk partition eviction fault.'
+									'Could not remove this style from device.'
 								)
 							}
 						},
@@ -293,7 +124,7 @@ const StorageRow = React.memo<StorageRowProps>(
 			<Row
 				icon={
 					<HardDrive
-						color={C.textMuted}
+						color={Colors.textMuted}
 						size={16}
 						strokeWidth={1.5}
 					/>
@@ -307,7 +138,7 @@ const StorageRow = React.memo<StorageRowProps>(
 						</Text>
 						<View style={styles.deleteIcon}>
 							<Trash2
-								color={C.error}
+								color={Colors.error}
 								size={14}
 								strokeWidth={1.8}
 							/>
@@ -321,98 +152,23 @@ const StorageRow = React.memo<StorageRowProps>(
 StorageRow.displayName = 'StorageRow'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TOGGLE ROW
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface ToggleRowProps {
-	icon: React.ReactNode
-	label: string
-	subtitle?: string
-	value: boolean
-	onValueChange: (val: boolean) => void
-	noBorder?: boolean
-}
-
-const ToggleRow = React.memo<ToggleRowProps>(
-	({ icon, label, subtitle, value, onValueChange, noBorder }) => (
-		<View
-			style={[
-				styles.row,
-				styles.toggleRow,
-				!noBorder && styles.rowBorder,
-			]}
-		>
-			<View style={styles.rowLeft}>
-				<View style={styles.rowIcon}>{icon}</View>
-				<View style={styles.toggleLabelBlock}>
-					<Text style={styles.rowLabel}>{label}</Text>
-					{subtitle && (
-						<Text style={styles.toggleSubtitle}>{subtitle}</Text>
-					)}
-				</View>
-			</View>
-			<Switch
-				value={value}
-				onValueChange={onValueChange}
-				trackColor={{ false: C.border, true: C.primaryMid }}
-				thumbColor={Platform.OS === 'ios' ? undefined : C.white}
-			/>
-		</View>
-	)
-)
-ToggleRow.displayName = 'ToggleRow'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// QUEUE ACTIVITY STAT ROW
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface QueueStatProps {
-	icon: React.ReactNode
-	label: string
-	count: number
-	color: string
-}
-
-const QueueStat = React.memo<QueueStatProps>(
-	({ icon, label, count, color }) => (
-		<View style={styles.queueStatRow}>
-			{icon}
-			<Text style={styles.queueStatLabel}>{label}</Text>
-			<View
-				style={[
-					styles.queueStatBadge,
-					{
-						backgroundColor: `${color}18`,
-						borderColor: `${color}35`,
-					},
-				]}
-			>
-				<Text style={[styles.queueStatCount, { color }]}>{count}</Text>
-			</View>
-		</View>
-	)
-)
-QueueStat.displayName = 'QueueStat'
-
-// ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function SettingsScreen(): React.JSX.Element {
 	const insets = useSafeAreaInsets()
 
-	// ── Model store ───────────────────────────────────────────────────────────
+	// ── Store subscriptions ────────────────────────────────────────────────────
 	const catalog = useModelStore(useShallow((s) => s.catalog))
 	const setGlobalCatalog = useModelStore((s) => s.updateCatalog)
 	const exportFormat = useModelStore(useShallow((s) => s.exportFormat))
 	const setExportFormat = useModelStore(useShallow((s) => s.setExportFormat))
 
-	// ── Job store ─────────────────────────────────────────────────────────────
 	const jobs = useStyleJobStore((s) => s.jobs)
 	const clearCompleted = useStyleJobStore((s) => s.clearCompleted)
 	const removeJob = useStyleJobStore((s) => s.removeJob)
 
-	// Derived job stats
+	// ── Derived job counts ─────────────────────────────────────────────────────
 	const queuedCount = useMemo(
 		() => jobs.filter((j) => j.status === 'QUEUED').length,
 		[jobs]
@@ -434,13 +190,12 @@ export default function SettingsScreen(): React.JSX.Element {
 		[jobs]
 	)
 
-	// ── Downloaded models ─────────────────────────────────────────────────────
+	// ── Downloaded models + total footprint ────────────────────────────────────
 	const downloadedModels = useMemo(
 		() => catalog.filter((m) => m.downloadStatus === 'downloaded'),
 		[catalog]
 	)
 
-	// ── Total storage (real — same computation as Storage section) ────────────
 	const [totalBytes, setTotalBytes] = useState(0)
 
 	useEffect(() => {
@@ -458,13 +213,11 @@ export default function SettingsScreen(): React.JSX.Element {
 		return () => clearTimeout(timer)
 	}, [downloadedModels])
 
-	// ── Handlers ──────────────────────────────────────────────────────────────
+	// ── Handlers ───────────────────────────────────────────────────────────────
 
 	const handleFormatSelect = useCallback(
 		(fmt: ExportFormat) => {
-			tracker.log('Default export asset compression type updated', {
-				selectedFormat: fmt,
-			})
+			tracker.log('Export format updated', { selectedFormat: fmt })
 			setExportFormat(fmt)
 		},
 		[setExportFormat]
@@ -524,24 +277,24 @@ export default function SettingsScreen(): React.JSX.Element {
 						tracker.log(
 							'User initiated full cache clear from settings'
 						)
-						// Clear assets for each downloaded model
 						downloadedModels.forEach((m) => {
 							try {
 								deleteStyleAssets(m.id)
 							} catch {
-								// silent per-model failure
+								// Per-model failure is silent — best-effort cleanup
 							}
 						})
-						const updated = catalog.map((m) =>
-							m.downloadStatus === 'downloaded'
-								? {
-										...m,
-										downloadStatus:
-											'not_downloaded' as const,
-									}
-								: m
+						setGlobalCatalog(
+							catalog.map((m) =>
+								m.downloadStatus === 'downloaded'
+									? {
+											...m,
+											downloadStatus:
+												'not_downloaded' as const,
+										}
+									: m
+							)
 						)
-						setGlobalCatalog(updated)
 					},
 				},
 			]
@@ -552,7 +305,7 @@ export default function SettingsScreen(): React.JSX.Element {
 		router.push('/(screens)/about-contact')
 	}, [])
 
-	const combinedScrollStyle = useMemo(
+	const scrollContentStyle = useMemo(
 		() => [
 			styles.scrollContent,
 			{ paddingTop: insets.top + 16, paddingBottom: insets.bottom - 17 },
@@ -560,19 +313,27 @@ export default function SettingsScreen(): React.JSX.Element {
 		[insets.top, insets.bottom]
 	)
 
+	// ── Format note — derived from current selection ───────────────────────────
+	const formatNote =
+		exportFormat === 'HEIC' || exportFormat === 'HEIF'
+			? 'HEIC/HEIF: smallest file size, Apple devices. May not open on Windows without conversion.'
+			: exportFormat === 'PNG'
+				? 'PNG: lossless quality, larger files.'
+				: 'JPEG/JPG: universal compatibility, compressed.'
+
 	return (
 		<ScrollView
-			style={[styles.screen, { backgroundColor: C.bg }]}
-			contentContainerStyle={combinedScrollStyle}
+			style={[styles.screen, { backgroundColor: Colors.bg }]}
+			contentContainerStyle={scrollContentStyle}
 			showsVerticalScrollIndicator={false}
 		>
 			{/* Page header */}
 			<View style={styles.pageHeader}>
-				<Settings color={C.primaryMid} size={22} strokeWidth={1.6} />
+				<Settings color={Colors.primary} size={22} strokeWidth={1.6} />
 				<Text style={styles.pageTitle}>Settings</Text>
 			</View>
 
-			{/* ── Queue Activity (NEW) ────────────────────────────────────────── */}
+			{/* ── Queue Activity ─────────────────────────────────────────────── */}
 			{jobs.length > 0 && (
 				<Section title="Queue Activity">
 					<View style={styles.queueStatsGrid}>
@@ -580,80 +341,79 @@ export default function SettingsScreen(): React.JSX.Element {
 							<QueueStat
 								icon={
 									<Zap
-										color={C.primaryMid}
+										color={Colors.primary}
 										size={14}
 										strokeWidth={2}
 									/>
 								}
 								label="Processing"
 								count={processingCount}
-								color={C.primaryMid}
+								color={Colors.primary}
 							/>
 						)}
 						{queuedCount > 0 && (
 							<QueueStat
 								icon={
 									<Clock
-										color={C.textMuted}
+										color={Colors.textMuted}
 										size={14}
 										strokeWidth={2}
 									/>
 								}
 								label="Queued"
 								count={queuedCount}
-								color={C.textMuted}
+								color={Colors.textMuted}
 							/>
 						)}
 						{batteryPausedCount > 0 && (
 							<QueueStat
 								icon={
 									<Zap
-										color={C.warning}
+										color={Colors.warning}
 										size={14}
 										strokeWidth={2}
 									/>
 								}
 								label="Paused"
 								count={batteryPausedCount}
-								color={C.warning}
+								color={Colors.warning}
 							/>
 						)}
 						{doneCount > 0 && (
 							<QueueStat
 								icon={
 									<CheckCircle2
-										color={C.success}
+										color={Colors.success}
 										size={14}
 										strokeWidth={2}
 									/>
 								}
 								label="Completed"
 								count={doneCount}
-								color={C.success}
+								color={Colors.success}
 							/>
 						)}
 						{errorCount > 0 && (
 							<QueueStat
 								icon={
 									<AlertCircle
-										color={C.errorDeep}
+										color={Colors.errorDeep}
 										size={14}
 										strokeWidth={2}
 									/>
 								}
 								label="Failed"
 								count={errorCount}
-								color={C.errorDeep}
+								color={Colors.errorDeep}
 							/>
 						)}
 					</View>
 
-					{/* Queue management actions */}
 					{doneCount > 0 && (
 						<Row
 							icon={
 								<Images
-									color={C.textMuted}
+									color={Colors.textMuted}
 									size={16}
 									strokeWidth={1.5}
 								/>
@@ -668,7 +428,7 @@ export default function SettingsScreen(): React.JSX.Element {
 						<Row
 							icon={
 								<AlertCircle
-									color={C.error}
+									color={Colors.error}
 									size={16}
 									strokeWidth={1.5}
 								/>
@@ -684,11 +444,11 @@ export default function SettingsScreen(): React.JSX.Element {
 			)}
 
 			{/* ── Data & Storage ─────────────────────────────────────────────── */}
-			<Section title="Data &amp; Storage">
+			<Section title="Data & Storage">
 				<Row
 					icon={
 						<HardDrive
-							color={C.downloaded}
+							color={Colors.successLegacy}
 							size={16}
 							strokeWidth={1.5}
 						/>
@@ -715,12 +475,12 @@ export default function SettingsScreen(): React.JSX.Element {
 				/>
 			</Section>
 
-			{/* ── 1. Export Format ───────────────────────────────────────────── */}
+			{/* ── Export Format ──────────────────────────────────────────────── */}
 			<Section title="Default export format">
 				<View style={styles.formatSection}>
 					<View style={styles.formatHeader}>
 						<FileImage
-							color={C.textMuted}
+							color={Colors.textMuted}
 							size={16}
 							strokeWidth={1.5}
 						/>
@@ -730,17 +490,11 @@ export default function SettingsScreen(): React.JSX.Element {
 						selected={exportFormat}
 						onSelect={handleFormatSelect}
 					/>
-					<Text style={styles.formatNote}>
-						{exportFormat === 'HEIC' || exportFormat === 'HEIF'
-							? 'HEIC/HEIF: smallest file size, Apple devices. May not open on Windows without conversion.'
-							: exportFormat === 'PNG'
-								? 'PNG: lossless quality, larger files.'
-								: 'JPEG/JPG: universal compatibility, compressed.'}
-					</Text>
+					<Text style={styles.formatNote}>{formatNote}</Text>
 				</View>
 			</Section>
 
-			{/* ── 2. Storage Management ─────────────────────────────────────── */}
+			{/* ── Storage Management ─────────────────────────────────────────── */}
 			<Section title="Storage management">
 				{downloadedModels.length === 0 ? (
 					<View style={styles.emptyRow}>
@@ -760,20 +514,16 @@ export default function SettingsScreen(): React.JSX.Element {
 				)}
 
 				{downloadedModels.length > 0 && (
-					<View style={[styles.row, styles.totalRow]}>
-						<View style={styles.rowLeft}>
-							<View style={styles.rowIcon}>
-								<HardDrive
-									color={C.primaryMid}
-									size={16}
-									strokeWidth={1.5}
-								/>
-							</View>
-							<View style={styles.rowLabelBlock}>
-								<Text style={styles.rowLabel}>
-									Total space used
-								</Text>
-							</View>
+					<View style={[styles.totalRow]}>
+						<View style={styles.totalLeft}>
+							<HardDrive
+								color={Colors.primary}
+								size={16}
+								strokeWidth={1.5}
+							/>
+							<Text style={styles.totalLabel}>
+								Total space used
+							</Text>
 						</View>
 						<Text style={styles.totalBytes}>
 							{formatBytes(totalBytes)}
@@ -782,12 +532,12 @@ export default function SettingsScreen(): React.JSX.Element {
 				)}
 			</Section>
 
-			{/* ── 4. About ─────────────────────────────────────────────────── */}
+			{/* ── About ──────────────────────────────────────────────────────── */}
 			<Section title="About">
 				<Row
 					icon={
 						<ShieldCheck
-							color={C.primaryMid}
+							color={Colors.primary}
 							size={16}
 							strokeWidth={1.5}
 						/>
@@ -798,7 +548,7 @@ export default function SettingsScreen(): React.JSX.Element {
 				<Row
 					icon={
 						<MessageCircle
-							color={C.textMuted}
+							color={Colors.textMuted}
 							size={16}
 							strokeWidth={1.5}
 						/>
@@ -830,138 +580,60 @@ const styles = StyleSheet.create({
 		marginBottom: 28,
 	},
 	pageTitle: {
-		color: C.text,
+		color: Colors.text,
 		fontSize: 26,
 		fontWeight: '800',
 		letterSpacing: -0.5,
 	},
 
-	section: { marginBottom: 28 },
-	sectionTitle: {
-		color: C.textMuted,
-		fontSize: 11,
-		fontWeight: '700',
-		letterSpacing: 0.8,
-		textTransform: 'uppercase',
-		marginBottom: 10,
-	},
-	sectionCard: {
-		backgroundColor: C.surface,
-		borderRadius: 16,
-		borderWidth: 1,
-		borderColor: C.border,
-		overflow: 'hidden',
-	},
-
-	row: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'space-between',
-		paddingHorizontal: 16,
-		paddingVertical: 14,
-		minHeight: 52,
-	},
-	rowBorder: {
-		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: C.border,
-	},
-	rowPressed: { backgroundColor: C.surfaceHigh },
-	rowLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
-	rowIcon: {
-		width: 32,
-		height: 32,
-		borderRadius: 8,
-		backgroundColor: C.surfaceHigh,
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	rowIconDanger: { backgroundColor: `${C.error}15` },
-	rowLabelBlock: { flex: 1 },
-	rowLabel: { color: C.text, fontSize: 15, fontWeight: '500' },
-	rowLabelDanger: { color: C.error },
-	rowSubtitle: { color: C.textMuted, fontSize: 12, marginTop: 1 },
-	rowRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-
-	// Toggle
-	toggleRow: { paddingVertical: 12 },
-	toggleLabelBlock: { flex: 1 },
-	toggleSubtitle: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-
-	// Format picker
-	formatSection: { padding: 16, gap: 14 },
-	formatHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-	formatLabel: { color: C.textMuted, fontSize: 14, fontWeight: '500' },
-	formatPicker: {
-		flexDirection: 'row',
-		backgroundColor: C.surfaceHigh,
-		borderRadius: 10,
-		borderWidth: 1,
-		borderColor: C.border,
-		overflow: 'hidden',
-	},
-	formatChip: {
-		flex: 1,
-		flexDirection: 'row',
-		alignItems: 'center',
-		justifyContent: 'center',
-		gap: 4,
-		paddingVertical: 10,
-		borderRightWidth: StyleSheet.hairlineWidth,
-		borderRightColor: C.border,
-	},
-	formatChipFirst: {},
-	formatChipLast: { borderRightWidth: 0 },
-	formatChipSelected: { backgroundColor: C.primary },
-	formatChipText: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
-	formatChipTextSelected: { color: C.white },
-	formatNote: { color: C.textDim, fontSize: 12, lineHeight: 17 },
-
-	// Storage
-	storageRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-	storageSize: { color: C.textMuted, fontSize: 13, fontWeight: '500' },
-	deleteIcon: {
-		width: 28,
-		height: 28,
-		borderRadius: 8,
-		backgroundColor: `${C.error}15`,
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	totalRow: { backgroundColor: `${C.primary}0D` },
-	totalBytes: { color: C.primary, fontSize: 14, fontWeight: '700' },
-
-	// Queue activity section
+	// Queue stats grid
 	queueStatsGrid: {
 		padding: 16,
 		paddingBottom: 8,
 		gap: 10,
 		borderBottomWidth: StyleSheet.hairlineWidth,
-		borderBottomColor: C.border,
+		borderBottomColor: Colors.border,
 	},
-	queueStatRow: {
+
+	// Format section
+	formatSection: { padding: 16, gap: 14 },
+	formatHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+	formatLabel: { color: Colors.textMuted, fontSize: 14, fontWeight: '500' },
+	formatNote: { color: Colors.textDim, fontSize: 12, lineHeight: 17 },
+
+	// Storage row accessories
+	storageRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+	storageSize: { color: Colors.textMuted, fontSize: 13, fontWeight: '500' },
+	deleteIcon: {
+		width: 28,
+		height: 28,
+		borderRadius: 8,
+		backgroundColor: `${Colors.error}15`,
+		justifyContent: 'center',
+		alignItems: 'center',
+	},
+
+	// Total row
+	totalRow: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		gap: 10,
+		justifyContent: 'space-between',
+		paddingHorizontal: 16,
+		paddingVertical: 14,
+		backgroundColor: `${Colors.primary}0D`,
 	},
-	queueStatLabel: { flex: 1, color: C.text, fontSize: 14, fontWeight: '500' },
-	queueStatBadge: {
-		minWidth: 32,
-		paddingHorizontal: 8,
-		paddingVertical: 3,
-		borderRadius: 10,
-		borderWidth: 1,
-		alignItems: 'center',
-	},
-	queueStatCount: { fontSize: 13, fontWeight: '800' },
+	totalLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+	totalLabel: { color: Colors.text, fontSize: 15, fontWeight: '500' },
+	totalBytes: { color: Colors.primary, fontSize: 14, fontWeight: '700' },
 
 	// Misc
 	emptyRow: { padding: 20, alignItems: 'center' },
-	emptyRowText: { color: C.textMuted, fontSize: 14 },
+	emptyRowText: { color: Colors.textMuted, fontSize: 14 },
+	cacheLabel: { color: Colors.textMuted, fontSize: 13 },
 	versionFooter: {
-		color: C.textDim,
+		color: Colors.textDim,
 		fontSize: 11,
 		textAlign: 'center',
 		marginTop: 8,
 	},
-	cacheLabel: { color: C.textMuted, fontSize: 13 },
 })

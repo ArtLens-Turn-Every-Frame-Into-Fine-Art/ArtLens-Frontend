@@ -74,7 +74,6 @@
 import { File, Directory, Paths } from 'expo-file-system'
 import { createMMKV } from 'react-native-mmkv'
 
-import { syncManifest as apiSyncManifest } from '@/services/api'
 import {
 	DEFAULT_MODEL_CONFIG,
 	DOWNLOAD_MULTIPLEX_WEIGHTS,
@@ -83,7 +82,6 @@ import {
 } from '@/shared/utils/constants'
 import {
 	STORAGE_INSTANCE_IDS,
-	STORAGE_KEYS,
 	MODEL_REGISTRY_KEYS,
 	FS_CONFIG,
 } from '@/shared/utils/storageKeys'
@@ -96,7 +94,6 @@ import type {
 	StyleId,
 	ManifestUpdate,
 	ModelConfig,
-	RemoteModelConfig,
 	ModelRegistryEntry,
 	JobStatus,
 } from '@/types'
@@ -111,55 +108,6 @@ const tracker = createTracker('ModelManager')
 const _storage = createMMKV({ id: STORAGE_INSTANCE_IDS.MODELS })
 
 const REGISTRY_KEY_PREFIX = MODEL_REGISTRY_KEYS.ITEM_PREFIX
-const CLIENT_HASH_KEY = STORAGE_KEYS.MANIFEST_HASH
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CONFIG HYDRATION
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Converts a RemoteModelConfig (partial API shape) into a fully-hydrated
- * ModelConfig by merging with DEFAULT_MODEL_CONFIG.
- *
- * Validation contract per field:
- *   - Numeric resolution fields (mainModel, previewModel): accepted only if
- *     >= MIN_INFERENCE_RESOLUTION. A zero or negative value indicates a
- *     manifest corruption or schema error and falls back to the default.
- *   - tileOverlap: accepted if > 0 (fractional or pixel-count form).
- *   - luminanceBlend: accepted if in the valid range [0.0, 1.0].
- *   - ColourMode strings: accepted if truthy (non-empty string).
- *
- * This function is the SINGLE point of hydration. It is called at every
- * manifest write path so the registry always stores a complete, validated
- * ModelConfig — never a partial RemoteModelConfig.
- */
-export function hydrateRemoteConfig(remote: RemoteModelConfig): ModelConfig {
-	const d = DEFAULT_MODEL_CONFIG
-
-	const mainModel =
-		typeof remote.mainModel === 'number' &&
-		remote.mainModel >= MIN_INFERENCE_RESOLUTION
-			? remote.mainModel
-			: d.mainModel
-
-	const previewModel =
-		typeof remote.previewModel === 'number' &&
-		remote.previewModel >= MIN_INFERENCE_RESOLUTION
-			? remote.previewModel
-			: d.previewModel
-
-	return {
-		mainModel,
-		previewModel,
-		// Engine-only fields — API does not send these today.
-		// The conditional guards future-proof against the API beginning to
-		// serve them, so they will be adopted automatically without a code change.
-		tileOverlap: d.tileOverlap,
-		luminanceBlend: d.luminanceBlend,
-		defaultColourMode: d.defaultColourMode,
-		preferredColourMode: d.preferredColourMode,
-	}
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL HELPERS — REGISTRY
@@ -265,136 +213,6 @@ function _makeProgressDispatcher(styleId: StyleId): {
 	}
 
 	return { dispatch, cancel }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MANIFEST DELTA SYNCHRONIZATION
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Executes a delta synchronization pass via the centralized api.ts client.
- * On 304 Not Modified (null return from api layer): no-op.
- * On 200: applies delta to local MMKV registry and kicks off background downloads.
- */
-export async function syncManifest(): Promise<void> {
-	const currentClientHash = _storage.getString(CLIENT_HASH_KEY) ?? ''
-
-	try {
-		tracker.log(
-			`Initiating manifest sync. clientHash="${currentClientHash}"`
-		)
-
-		const localModelsPayload = getAllRegisteredStyleIds().map((id) => {
-			const entry = _readRegistryEntry(id)
-			return { id, version: entry ? entry.version : 0 }
-		})
-
-		const syncResult = await apiSyncManifest({
-			clientHash: currentClientHash,
-			localModels: localModelsPayload,
-		})
-
-		// 304 Not Modified — api.ts returns null.
-		if (!syncResult) {
-			tracker.log('Manifest unchanged (304). Cache is up-to-date.')
-			return
-		}
-
-		tracker.log(
-			`Delta payload received. ${syncResult.updates.length} update(s), ` +
-				`${syncResult.deleted.length} deletion(s).`
-		)
-
-		// ── Apply updates ──────────────────────────────────────────────────────
-		//
-		// BUG 8 FIX: CONCURRENT DOWNLOAD BACKPRESSURE
-		// ────────────────────────────────────────────
-		// The original code fired all downloads concurrently with no limit:
-		//   for (const item of syncResult.updates) {
-		//       downloadStyleAssets(item).catch(...)
-		//   }
-		// With 15 updated models that starts 15 simultaneous File.downloadFileAsync
-		// streams. On a congested mobile connection this saturates the link and
-		// causes all progress bars to stall at their initial beacon tick while
-		// every stream waits for bandwidth — visible as a freeze across all cards.
-		//
-		// Fix: a simple semaphore capped at MAX_CONCURRENT_DOWNLOADS (2).
-		// At most 2 streams are in flight at once; additional downloads are queued
-		// and start as a running slot completes. The aggregate throughput for a
-		// batch of 15 models is effectively the same — most time is spent in the
-		// streams themselves — but the per-stream progress reporting becomes
-		// meaningful and the UI never shows all cards frozen simultaneously.
-		const MAX_CONCURRENT_DOWNLOADS = 2
-		let activeDownloads = 0
-		const downloadQueue: ManifestUpdate[] = []
-
-		const _startNextDownload = (): void => {
-			while (
-				activeDownloads < MAX_CONCURRENT_DOWNLOADS &&
-				downloadQueue.length > 0
-			) {
-				const item = downloadQueue.shift()!
-				activeDownloads++
-				downloadStyleAssets(item)
-					.catch((err) => {
-						tracker.error(
-							`Background download failed for style ${item.id}: ${err}`
-						)
-					})
-					.finally(() => {
-						activeDownloads--
-						_startNextDownload()
-					})
-			}
-		}
-
-		for (const item of syncResult.updates) {
-			const existing = _readRegistryEntry(item.id)
-
-			if (!existing || existing.version !== item.version) {
-				tracker.log(`Scheduling download for style: ${item.id}`)
-
-				// Hydrate the RemoteModelConfig at write time — the registry
-				// always stores a fully-merged ModelConfig, never the raw partial.
-				const newEntry: ModelRegistryEntry = {
-					id: item.id,
-					name: item.name,
-					version: item.version,
-					downloadStatus: 'not_downloaded',
-					previewPath: null,
-					mainPath: null,
-					config: hydrateRemoteConfig(item.config),
-					previewSize: 0,
-					mainSize: 0,
-				}
-				_writeRegistryEntry(item.id, newEntry)
-
-				// Enqueue for rate-limited background download (max 2 concurrent).
-				downloadQueue.push(item)
-			}
-		}
-
-		// Drain the queue up to the concurrency cap.
-		_startNextDownload()
-
-		// ── Process server-instructed deletions ───────────────────────────────
-		// PRD § 2.2: server-deleted styles are marked inactive but kept on disk.
-		for (const targetId of syncResult.deleted) {
-			tracker.log(`Server-instructed inactive marker for: ${targetId}`)
-			useModelStore
-				.getState()
-				.updateDownloadStatus(targetId, 'not_downloaded')
-		}
-
-		// ── Persist new client hash ───────────────────────────────────────────
-		_storage.set(CLIENT_HASH_KEY, syncResult.manifestHash)
-		tracker.log(
-			`Sync complete. clientHash updated to: ${syncResult.manifestHash}`
-		)
-	} catch (error) {
-		tracker.error(`Manifest sync failed: ${error}`)
-		throw error
-	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -945,22 +763,6 @@ export function getRegistryEntry(styleId: StyleId): ModelRegistryEntry | null {
 	return _readRegistryEntry(styleId)
 }
 
-/** Returns all style IDs that have a registry entry (any status). */
-export function getAllRegisteredStyleIds(): StyleId[] {
-	return _storage
-		.getAllKeys()
-		.filter((k: string) => k.startsWith(REGISTRY_KEY_PREFIX))
-		.map((k: string) => k.slice(REGISTRY_KEY_PREFIX.length))
-}
-
-/** Returns only style IDs whose registry entry is in 'downloaded' state. */
-export function getDownloadedStyleIds(): StyleId[] {
-	return getAllRegisteredStyleIds().filter((id) => {
-		const entry = _readRegistryEntry(id)
-		return entry?.downloadStatus === 'downloaded'
-	})
-}
-
 /**
  * Returns the true physical on-disk byte count (preview + main) for a style.
  * Returns 0 if the style is not in 'downloaded' state.
@@ -969,19 +771,4 @@ export function getPhysicalFootprint(styleId: StyleId): number {
 	const entry = _readRegistryEntry(styleId)
 	if (!entry || entry.downloadStatus !== 'downloaded') return 0
 	return (entry.previewSize ?? 0) + (entry.mainSize ?? 0)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DEBUG UTILITIES
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function debugInspectSharedStorage(): void {
-	tracker.log('============== MMKV STORAGE INSPECTION ==============')
-	const allKeys = _storage.getAllKeys()
-	tracker.log(`All keys in '${STORAGE_INSTANCE_IDS.MODELS}':`)
-	for (const key of allKeys) {
-		const val = _storage.getString(key)
-		tracker.log(`  [${key}] = ${val ? val.slice(0, 120) : '<empty>'}...`)
-	}
-	tracker.log('=====================================================')
 }

@@ -6,7 +6,7 @@
 import React, { useEffect } from 'react'
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native'
 import { router } from 'expo-router'
-import { useIncomingShare } from 'expo-sharing'
+import { clearSharedPayloads, useIncomingShare } from 'expo-sharing'
 import { createTracker } from '@/shared/utils/logger'
 
 const tracker = createTracker('expo-sharing')
@@ -19,20 +19,16 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 		// 1. Wait until native platform finishes extracting/caching the file completely
 		if (isResolving) return
 
-		// 2. STAGE 1 SAFEGUARD: Android frequently triggers an initial empty payload pass
-		// while warm-starting the app cache. If it's undefined or completely empty, wait for the next tick.
+		// 2. Fallback check: If truly resolved and completely empty, route home
 		if (!resolvedSharedPayloads || resolvedSharedPayloads.length === 0) {
-			tracker.log(
-				'Share payload array is empty, waiting for native cache resolution...'
-			)
+			tracker.warn('Sharing link invoked but no payloads resolved.')
+			router.replace('/(tabs)/home')
 			return
 		}
 
 		tracker.log(
 			'Native share intent payloads resolved from background cache',
-			{
-				payloadCount: resolvedSharedPayloads.length,
-			}
+			{ payloadCount: resolvedSharedPayloads.length }
 		)
 
 		// Look for the first shared item matching an image or file asset type
@@ -45,26 +41,24 @@ export default function ExpoSharingReceiver(): React.JSX.Element {
 		if (imagePayload?.contentUri) {
 			tracker.log(
 				'Valid shared asset path resolved; forwarding to styles view',
-				{
-					uri: imagePayload.contentUri.substring(0, 30) + '...',
-				}
+				{ uri: imagePayload.contentUri.substring(0, 30) + '...' }
 			)
 
-			// 3. Safely URL encode the local file path string so slashes don't break Expo Router segments
 			const encodedUri = encodeURIComponent(imagePayload.contentUri)
 
-			// 4. Route explicitly to the screen.
-			// NOTE: In Expo Router, you must route via the group folder layout it sits in,
-			// which is likely '/(screens)/StyleSelectionScreen' based on your layout configuration.
 			router.replace({
 				pathname: '/(screens)/StyleSelectionScreen',
 				params: { sourceUri: encodedUri },
 			})
+
+			// Clear cache ONLY after successful execution routing
+			setTimeout(() => clearSharedPayloads(), 500)
 		} else {
 			tracker.warn(
-				'Sharing link invoked but no valid image target asset payload was found'
+				'Sharing link invoked but no valid image target asset payload found'
 			)
 			router.replace('/(tabs)/home')
+			setTimeout(() => clearSharedPayloads(), 500)
 		}
 	}, [resolvedSharedPayloads, isResolving])
 

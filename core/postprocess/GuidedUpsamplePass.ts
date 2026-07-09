@@ -86,7 +86,7 @@ import {
 // SECTION 1 — STYLE BLEND PROFILES
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const enum GuideInjectionMode {
+const enum GuideInjectionMode {
 	/** No guide overlay. Cubic interpolation is the only reconstruction pass. */
 	None = 'none',
 	/** SoftLight + low alpha — preserves painterly texture, recovers structure. */

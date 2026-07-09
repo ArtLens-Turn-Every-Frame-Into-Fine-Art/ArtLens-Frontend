@@ -24,7 +24,6 @@ By running inference completely edge-side, the system guarantees network isolati
 - **Battery-aware resource guarding.** The main inference slot is blocked when battery ≤ 5% or low-power mode (battery-saver) is active. Affected jobs transition to `BATTERY_PAUSED` and auto-resume when power is restored.
 - **Persistent asynchronous queue.** Style jobs survive app restarts and OS terminations, backed by MMKV for zero-latency persistence.
 - **Delta manifest sync.** The style catalogue is kept up to date via a cryptographic hash comparison. Only new or modified `.tflite` weights are downloaded, through a dual-stream concurrency-limited download pipeline.
-- **Live canvas refinement.** Users can blend the stylised output with the original image (0–100%) using Skia shader-based intensity masking without re-triggering inference (in-development).
 - **VisionCamera v5 viewfinder.** Full-screen native capture with dynamic flash (Off / On / Auto), front/back lens switching, and battery-level UI guards.
 
 ---
@@ -104,17 +103,24 @@ Without this line, any `require('./model.tflite')` or file-system access to a bu
 
 ```
 app/
-├── (tabs)/          Persistent tab bar views
-│   ├── home.tsx     Entry screen
-│   ├── camera.tsx   VisionCamera v5 viewfinder + photo capture
-│   ├── gallery.tsx  Style job queue and results
-│   ├── styles.tsx   Style catalogue + manifest sync
-│   └── settings.tsx User preferences
-├── (screens)/       Modal workflow screens
+├── (tabs)/                        Persistent tab bar views
+│   ├── home.tsx                   Entry screen
+│   ├── camera.tsx                 VisionCamera v5 viewfinder + photo capture
+│   ├── gallery.tsx                Style job queue and results
+│   ├── styles.tsx                 Style catalogue + manifest sync
+│   └── settings.tsx               User preferences
+├── (screens)/                     Modal workflow screens
 │   ├── StyleSelectionScreen.tsx   Pick a style → enqueue a job
 │   ├── refine.tsx                 Blend intensity slider (Skia)
 │   ├── edit-canvas.tsx            Before/after compare slider
-│   └── export.tsx                 Share / save to gallery
+│   ├── export.tsx                 Share / save to gallery
+│   ├── about-contact.tsx          App info and contact form
+│   └── background-generator.tsx   Background style generation screen
+├── expo-sharing.tsx               Deep-link handler for incoming share intents
+└── index.tsx                      Root entry point / redirect
+│
+context/
+└── ContactContext.tsx             React context for contact form state
 │
 core/
 ├── inference/
@@ -126,20 +132,47 @@ core/
     └── ModelManager.ts            Manifest delta-sync + download multiplexer
 │
 features/
-└── style-transfer/
-    └── StyleJobService.ts         Background queue state machine
+├── gallery/
+│   └── components/                Gallery job list UI components
+├── home/
+│   └── components/                Home screen UI components
+├── style-selection/
+│   └── components/                Style picker card and skeleton components
+├── style-transfer/
+│   └── StyleJobService.ts         Background queue state machine
+├── styles/
+│   └── components/                Style catalogue grid and detail sheet
+└── upload/
+    └── hooks/
+        └── useImageSelection.ts   Image picker hook (camera + library)
 │
 shared/
 ├── stores/                        Zustand reactive global state
 │   ├── useStyleJobStore.ts        Job queue (QUEUED → PROCESSING → DONE)
 │   ├── useModelStore.ts           Model catalogue and download status
 │   └── useBatteryStore.ts         Battery level and power-saver monitor
+├── ui/                            Reusable UI primitives and design tokens
+│   ├── DesignTokens.ts            Colour palette, typography, spacing constants
+│   ├── FormatPicker.tsx           Export format selector component
+│   ├── ImageCompareSlider.tsx     Before/after swipe comparison widget
+│   ├── QueueStat.tsx              Queue statistics display pill
+│   ├── Row.tsx                    Flex row layout helper
+│   ├── Section.tsx                Titled section wrapper
+│   └── index.ts                  Barrel export
 └── utils/
     ├── tensorUtils.ts             Float32 buffer allocation and normalisation
-    └── constants.ts               Inference delegates, thresholds, limits
+    ├── constants.ts               Inference delegates, thresholds, limits
+    ├── config.ts                  Runtime environment configuration
+    ├── logger.ts                  Structured logging wrapper
+    ├── MediaPicker.ts             Camera / gallery media selection helpers
+    └── storageKeys.ts             MMKV key constants
 │
 services/
 └── api.ts                         Fetch-based manifest sync client
+│
+types/
+├── index.ts                       Shared TypeScript type definitions
+└── react-native-logger.d.ts       Type declarations for the logger module
 ```
 
 ### The Coarse-to-Fine Inference Pipeline

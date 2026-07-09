@@ -53,23 +53,24 @@ import {
 import { useContact } from '@/context/ContactContext'
 
 // — Design tokens & App constants ————————————————————————————————————————————
-import { APP_INFO, COLORS } from '@/shared/utils/constants'
+import { APP_INFO } from '@/shared/utils/constants'
+import { Colors } from '@/shared/ui'
 
 // Alias for ergonomic local use — maps to the light-theme tokens in constants.ts
 const C = {
-	bg: COLORS.white,
-	surface: COLORS.cardBg,
-	surfaceHigh: COLORS.background,
-	border: COLORS.border,
-	primary: COLORS.primary,
-	primaryMid: COLORS.primaryLight,
-	accent: COLORS.accent,
-	text: COLORS.textMain,
-	textMuted: COLORS.textGray,
-	textDim: COLORS.textGray,
-	success: COLORS.success,
+	bg: Colors.white,
+	surface: Colors.surfaceCard, // Updated from cardBg
+	surfaceHigh: Colors.bg, // Updated from background
+	border: Colors.borderSubtle, // Updated from border (maps to original #F2F2F7)
+	primary: Colors.primary,
+	primaryMid: Colors.primaryLight,
+	accent: Colors.error, // Updated from accent (maps to original #FF7675)
+	text: Colors.text, // Updated from text
+	textMuted: Colors.textMuted, // Updated from textMuted
+	textDim: Colors.textMuted, // Updated from textMuted
+	success: Colors.successLegacy, // Updated from success (maps to original #4CD964)
 	error: '#DC2626',
-	white: COLORS.white,
+	white: Colors.white,
 } as const
 
 // — Team data ————————————————————————————————————————————————————————————————
@@ -77,22 +78,22 @@ const TEAM = [
 	{
 		name: 'Muhammad Ahmad',
 		role: 'PM · AI',
-		avatar: 'https://i.pravatar.cc/100?u=ahmad',
+		avatar: 'https://i.ibb.co/j99SkrKg/avatar.jpg',
 	},
 	{
 		name: 'Yasir Iftikhar',
 		role: 'Algorithm',
-		avatar: 'https://i.pravatar.cc/100?u=yasir',
+		avatar: 'https://i.ibb.co/j99SkrKg/avatar.jpg',
 	},
 	{
 		name: 'Kaif Baig',
 		role: 'UI/UX',
-		avatar: 'https://i.pravatar.cc/100?u=kaif',
+		avatar: 'https://i.ibb.co/j99SkrKg/avatar.jpg',
 	},
 	{
 		name: 'Abdullah Amir',
-		role: 'Backend · API',
-		avatar: 'https://i.pravatar.cc/100?u=amir',
+		role: 'Frontend - Backend',
+		avatar: 'https://i.ibb.co/j99SkrKg/avatar.jpg',
 	},
 ] as const
 
@@ -194,9 +195,13 @@ export default function AboutContactScreen(): React.JSX.Element {
 
 	useEffect(() => {
 		if (error) {
-			Alert.alert('Send Failed', [{ text: 'OK', onPress: reset }])
+			Alert.alert(
+				'Send Failed',
+				'Your message could not be sent. Make sure you are connected to the interent before trying again.',
+				[{ text: 'OK' }]
+			)
 		}
-	}, [error, reset])
+	}, [error])
 
 	// — Handlers ———————————————————————————————————————————————————————————
 
@@ -204,6 +209,11 @@ export default function AboutContactScreen(): React.JSX.Element {
 		const trimName = name.trim()
 		const trimEmail = email.trim()
 		const trimMessage = message.trim()
+
+		if (trimMessage.length <= 10) {
+			Alert.alert('Incomplete', 'Entered message is too short.')
+			return
+		}
 
 		if (!trimName || !trimEmail || !trimMessage) {
 			Alert.alert(

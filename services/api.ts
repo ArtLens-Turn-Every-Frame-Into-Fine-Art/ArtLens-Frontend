@@ -12,7 +12,7 @@
  */
 
 import config from '@/shared/utils/config'
-import { ContactPayload, ManifestResponse, StyleId, SyncResult } from '@/types'
+import { ContactPayload, ManifestResponse, SyncResult } from '@/types'
 
 const BASE_URL = config.API_BASE
 
@@ -20,7 +20,7 @@ const BASE_URL = config.API_BASE
 // CENTRALIZED NETWORK HTTP CLIENT UTILS
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const api = {
+const api = {
 	/**
 	 * Dispatches an asynchronous hardware-bound POST action over global fetch operations.
 	 * Returns null if a target resource yields an HTTP 304 context status map pointer.
@@ -108,23 +108,4 @@ export async function submitContactForm(
 	}
 
 	return response
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UNIFIED STYLE SERVICE OBJECT WRAPPER EXPORTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Unified functional container grouping for cleaner store interactions throughout the workspace.
- * Uses strict type definitions from index.ts word-for-word.
- */
-export const StyleService = {
-	syncManifest: (req: {
-		clientHash?: string
-		localModels?: { id: StyleId; version: number }[]
-	}): Promise<SyncResult> => syncManifest(req),
-	submitFeedback: (
-		data: ContactPayload
-	): Promise<{ success: boolean; message: string }> =>
-		submitContactForm(data),
 }
