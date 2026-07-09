@@ -15,43 +15,19 @@ import type { TensorflowModelDelegate } from 'react-native-fast-tflite'
 
 export const APP_INFO = {
 	name: 'ArtLens',
-	version: '1.5.0',
-	buildNumber: '1024',
-	/** @deprecated alias for buildNumber — retained for legacy callers */
-	build: '1024',
+	version: '1.6.0',
 	supportEmail: 'art.lens.fyp@gmail.com',
-	twitterUrl: 'https://x.com/artlens_app',
 	xHandle: '@ArtLensApp',
 	album: 'ArtLens',
 	success_reset_ms: 4000,
 } as const
 
 // ============================================================================
-// 2. UI COLORS & LAYOUT
-// ============================================================================
-
-export const COLORS = {
-	primary: '#7B61FF',
-	primaryLight: '#A291FF',
-	accent: '#FF7675',
-	background: '#F8F9FB',
-	white: '#FFFFFF',
-	black: '#000000',
-	textMain: '#1C1C1E',
-	textGray: '#8E8E93',
-	border: '#F2F2F7',
-	cardBg: '#FBFBFF',
-	success: '#4CD964',
-	warning: '#FF9500',
-} as const
-
-// ============================================================================
-// 3. HARDWARE & COMPUTE CONSTRAINTS
+// 2. HARDWARE & COMPUTE CONSTRAINTS
 // ============================================================================
 
 export const BATTERY_LIMITS = {
 	CRITICAL_THRESHOLD_PERCENT: 5,
-	POLLING_INTERVAL_MS: 30000,
 } as const
 
 /**
@@ -81,7 +57,7 @@ export const INFERENCE_DELEGATES: {
 } as const
 
 // ============================================================================
-// 4. STYLE MODEL SAFETY FALLBACKS & PREPROCESSING
+// 3. STYLE MODEL SAFETY FALLBACKS & PREPROCESSING
 // ============================================================================
 
 /**
@@ -120,38 +96,12 @@ export const MODEL_PREPROCESS = {
 } as const
 
 /**
- * Gaussian window pre-computation parameters for the tiled overlap-add stitch.
- *
- * `MODEL_GAUSSIAN_SIGMA_DIV`: The tile resolution is divided by this value to
- * produce the Gaussian sigma. σ = resolution / MODEL_GAUSSIAN_SIGMA_DIV.
- * At the default σ = 512 / 5 = 102.4, edge weight ≈ exp(-3.125) ≈ 0.044.
- *
- * `GAUSSIAN_FLOOR_EPSILON`: A small positive constant added to every weight
- * after peak normalization. Prevents a zero denominator in the overlap-add
- * accumulator (divide-by-zero) on tiles that receive no overlap coverage.
- */
-export const MODEL_GAUSSIAN_SIGMA_DIV = 5.0 as const
-export const GAUSSIAN_FLOOR_EPSILON = 1e-6 as const
-
-/**
  * JPEG output quality for all stylized artwork exports.
  * Applied by both TiledInferenceRunner._encodeAndSave() and
  * SkiaRenderer.createCompositeSurfaceSnapshot().
  * Range [1, 100]. 90 preserves impasto texture without excessive file size.
  */
 export const OUTPUT_JPEG_QUALITY = 100 as const
-
-/**
- * Manifest cache schema version.
- *
- * BUMP THIS whenever the shape of cached manifest/model data changes.
- * A version increment causes all storage keys to change, forcing
- * old cached data to be ignored and re-fetched.
- *
- * **History:**
- * - `v2` — config: { mainModel: number, previewModel?: number } (inline)
- */
-export const MANIFEST_SCHEMA_VERSION = 2
 
 /**
  * The minimum acceptable resolution for any inference pass.

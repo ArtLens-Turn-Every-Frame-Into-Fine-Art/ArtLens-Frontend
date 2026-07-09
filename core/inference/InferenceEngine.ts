@@ -345,12 +345,6 @@ export function unloadModel(slot: ModelSlot): void {
 	)
 }
 
-export function unloadAllModels(): void {
-	unloadModel('preview')
-	unloadModel('main')
-	tracker.log('Both slots unloaded.')
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 6 — PUBLIC: loadMainModel
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,30 +604,7 @@ export async function loadPreviewModel(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 8 — PUBLIC: loadModel (backward-compat dispatch shim)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Generic slot dispatcher retained for backward compatibility.
- *
- * Prefer the explicit loadMainModel / loadPreviewModel call sites in all new
- * code — they carry full JSDoc, slot-specific guard logic (battery guard,
- * delegate rationale), and are easier to grep in the call graph.
- *
- * @deprecated Use loadMainModel / loadPreviewModel directly.
- */
-export async function loadModel(
-	slot: ModelSlot,
-	modelPath: string,
-	delegateOverride?: TensorflowModelDelegate[]
-): Promise<void> {
-	return slot === 'main'
-		? loadMainModel(modelPath, undefined, delegateOverride)
-		: loadPreviewModel(modelPath, undefined, delegateOverride)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SECTION 9 — PUBLIC: runInferenceSync (worklet-safe)
+// SECTION 8 — PUBLIC: runInferenceSync (worklet-safe)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function runInferenceSync(
@@ -674,7 +645,7 @@ export function runInferenceSync(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 10 — PUBLIC: STATE INSPECTION
+// SECTION 9 — PUBLIC: STATE INSPECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -683,17 +654,6 @@ export function runInferenceSync(
  */
 export function isModelLoaded(slot: ModelSlot): boolean {
 	return _getModel(slot) !== null
-}
-
-/**
- * Returns true if the model currently loaded in `slot` is INT8/UINT8 quantized.
- *
- * MANDATE 2: This value is resolved once at load time via _detectQuantization()
- * using either the manifest config hint or the tensor signature — never via a
- * runtime path heuristic. Returns false if no model is mounted (null sentinel).
- */
-export function isModelQuantized(slot: ModelSlot): boolean {
-	return _quantized[slot] === true
 }
 
 /**
@@ -716,12 +676,4 @@ export function getActiveModelPath(slot: ModelSlot): string | null {
  */
 export function getActiveModelConfig(slot: ModelSlot): ModelConfig | null {
 	return _loadedConfigs[slot]
-}
-
-export function isModelLoading(slot: ModelSlot): boolean {
-	return _loading[slot]
-}
-
-export function isPreviewModelReady(): boolean {
-	return _previewModel !== null
 }

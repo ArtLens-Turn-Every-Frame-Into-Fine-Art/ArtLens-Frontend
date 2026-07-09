@@ -2,7 +2,7 @@
   "expo": {
     "name": "ArtLens",
     "slug": "artlens",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "runtimeVersion": {
       "policy": "fingerprint"
     },

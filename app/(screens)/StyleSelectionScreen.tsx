@@ -1,34 +1,30 @@
 /**
  * ArtLens — StyleSelectionScreen
  *
- * Post-pick art style browser and queue pipeline link.
- *
- * This screen receives a `sourceUri` navigation parameter (the raw file URI of
- * the user's selected photo), presents the downloadable style catalog, tracks
- * live per-job rendering progress, and commits the final JobPayload into the
- * background stylization queue when the user confirms a selection.
+ * Post-pick art style browser and queue pipeline entry point.
  *
  * Interaction lifecycle:
- *   1. Receives sourceUri from navigation params (set by useImageSelection).
- *   2. Reads the downloaded style catalog from useModelStore.
- *   3. User selects a style card → selectedStyleId state updates.
- *   4. If a matching job is already PROCESSING, a progress overlay renders.
+ *   1. Receives `sourceUri` from navigation params (set by useImageSelection).
+ *   2. Reads the active style catalog from useModelStore.
+ *   3. User selects a downloaded style card → selectedStyleId updates.
+ *   4. If a job for this image is already PROCESSING, a progress overlay shows.
  *   5. "Apply Fine-Art Style" tap → enqueue() + processNextJobInQueue() (fire-and-forget).
  *   6. Immediately navigates to the Gallery tab.
  *
- * PRD § 3.3 StyleSelection Screen — Directory: src/features/upload/screens/StyleSelectionScreen.tsx
+ * Guard: if sourceUri is absent or invalid, renders a full-screen error state
+ * with a "Go Back" button rather than crashing or silently failing.
+ *
+ * PRD § 3.3 — Directory: app/(screens)/StyleSelectionScreen.tsx
  */
 
-import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useCallback, useMemo } from 'react'
 import {
 	View,
 	Text,
 	TouchableOpacity,
 	StyleSheet,
-	Dimensions,
 	ActivityIndicator,
 	Platform,
-	Animated,
 	Alert,
 	ScrollView,
 	TextInput,
@@ -36,15 +32,13 @@ import {
 import { StatusBar } from 'expo-status-bar'
 import { Image } from 'expo-image'
 import {
-	ChevronLeft,
-	Sparkles,
-	CheckCircle2,
-	Clock,
 	AlertCircle,
+	ChevronLeft,
 	Download,
 	Eye,
 	HelpCircle,
 	Search,
+	Sparkles,
 } from 'lucide-react-native'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -53,10 +47,16 @@ import { useModelStore } from '@/shared/stores/useModelStore'
 import { useShallow } from 'zustand/react/shallow'
 import { useStyleJobStore } from '@/shared/stores/useStyleJobStore'
 import { StyleJobService } from '@/features/style-transfer/StyleJobService'
-import type { StyleModel, JobPayload, StyleId } from '@/types'
 
+import type { JobPayload, StyleId } from '@/types'
 import { createTracker } from '@/shared/utils/logger'
-import { COLORS } from '@/shared/utils/constants'
+import {
+	EmptyStyleCatalog,
+	SelectionStyleCard,
+} from '@/features/style-selection/components'
+
+import { CatalogInfoItem, CatalogFaqItem } from '@/features/styles/components'
+import { Colors } from '@/shared/ui'
 
 const tracker = createTracker('StyleSelectionScreen')
 
@@ -64,265 +64,16 @@ const tracker = createTracker('StyleSelectionScreen')
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const H_PADDING = 20
 const COLUMN_GAP = 10
-const NUM_COLUMNS = 2
-const CARD_WIDTH =
-	(SCREEN_WIDTH - H_PADDING * 2 - COLUMN_GAP * (NUM_COLUMNS - 1)) /
-	NUM_COLUMNS
-//const CARD_HEIGHT = CARD_WIDTH * 1.35
 
 const CATEGORIES = ['All', 'Popular', 'New', 'Downloaded']
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Animated shimmer placeholder shown while a thumbnail is loading from cache
- * or remote URL.
- */
-function ThumbnailSkeleton(): React.ReactElement {
-	const anim = useRef(new Animated.Value(0.3)).current
-
-	useEffect(() => {
-		const pulse = Animated.loop(
-			Animated.sequence([
-				Animated.timing(anim, {
-					toValue: 0.7,
-					duration: 900,
-					useNativeDriver: true,
-				}),
-				Animated.timing(anim, {
-					toValue: 0.3,
-					duration: 900,
-					useNativeDriver: true,
-				}),
-			])
-		)
-		pulse.start()
-		return () => pulse.stop()
-	}, [anim])
-
-	return (
-		<Animated.View
-			style={[
-				StyleSheet.absoluteFill,
-				styles.thumbnailSkeleton,
-				{ opacity: anim },
-			]}
-		/>
-	)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// INFO ITEM
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface InfoItemProps {
-	icon: React.ReactNode
-	label: string
-}
-
-function InfoItem({ icon, label }: InfoItemProps): React.ReactElement {
-	return (
-		<View style={styles.infoItem}>
-			{icon}
-			<Text style={styles.infoText}>{label}</Text>
-		</View>
-	)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FAQ ITEM
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface FaqItemProps {
-	question: string
-	answer: string
-}
-
-function FaqItem({ question, answer }: FaqItemProps): React.ReactElement {
-	return (
-		<View style={styles.faqItem}>
-			<Text style={styles.faqQuestion}>{question}</Text>
-			<Text style={styles.faqAnswer}>{answer}</Text>
-		</View>
-	)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STYLE CARD
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface StyleCardProps {
-	model: StyleModel
-	isSelected: boolean
-	progressPercent: number | null // null = no active job, 0–100 = job in progress
-	onPress: (id: StyleId) => void
-}
-
-function StyleCard({
-	model,
-	isSelected,
-	progressPercent,
-	onPress,
-}: StyleCardProps): React.ReactElement {
-	const isDownloaded = model.downloadStatus === 'downloaded'
-	const isDownloading = model.downloadStatus === 'downloading'
-	const [isImageLoaded, setIsImageLoaded] = useState<boolean>(false)
-
-	const handlePress = useCallback(() => {
-		if (isDownloaded) {
-			onPress(model.id)
-		}
-	}, [isDownloaded, model.id, onPress])
-
-	// Scale animation on selection
-	const scaleAnim = useRef(new Animated.Value(1)).current
-
-	useEffect(() => {
-		Animated.spring(scaleAnim, {
-			toValue: isSelected ? 0.96 : 1,
-			tension: 200,
-			friction: 20,
-			useNativeDriver: true,
-		}).start()
-	}, [isSelected, scaleAnim])
-
-	return (
-		<TouchableOpacity
-			onPress={handlePress}
-			activeOpacity={isDownloaded ? 0.9 : 1}
-			style={styles.cardTouchable}
-			accessibilityRole="button"
-			accessibilityLabel={`Select ${model.name} art style`}
-			accessibilityState={{
-				selected: isSelected,
-				disabled: !isDownloaded,
-			}}
-		>
-			<Animated.View
-				style={[
-					styles.card,
-					isSelected && styles.cardSelected,
-					!isDownloaded && styles.cardDisabled,
-					{ transform: [{ scale: scaleAnim }] },
-				]}
-			>
-				{/* ── Thumbnail ── */}
-				<View style={styles.cardImageContainer}>
-					{!isImageLoaded && <ThumbnailSkeleton />}
-					<Image
-						source={{ uri: model.thumbnailUrl }}
-						style={StyleSheet.absoluteFill}
-						contentFit="cover"
-						transition={300}
-						onLoad={() => setIsImageLoaded(true)}
-						cachePolicy="memory-disk"
-					/>
-
-					{/* ── Processing progress overlay ── */}
-					{progressPercent !== null && (
-						<View style={styles.progressOverlay}>
-							<View style={styles.progressInner}>
-								<ActivityIndicator
-									size="small"
-									color={COLORS.primary}
-									style={styles.progressSpinner}
-								/>
-								<Text style={styles.progressText}>
-									{progressPercent}%
-								</Text>
-							</View>
-							<View style={styles.progressBarTrack}>
-								<View
-									style={[
-										styles.progressBarFill,
-										{ width: `${progressPercent}%` },
-									]}
-								/>
-							</View>
-						</View>
-					)}
-
-					{/* ── Download state badge ── */}
-					{!isDownloaded && (
-						<View style={styles.unavailableBadge}>
-							{isDownloading ? (
-								<Clock
-									size={12}
-									color={COLORS.textGray}
-									strokeWidth={2}
-								/>
-							) : (
-								<Text style={styles.unavailableBadgeText}>
-									Download
-								</Text>
-							)}
-						</View>
-					)}
-
-					{/* ── Selected checkmark ── */}
-					{isSelected && isDownloaded && (
-						<View style={styles.selectedBadge}>
-							<CheckCircle2
-								size={18}
-								color="#FFF"
-								strokeWidth={2.5}
-							/>
-						</View>
-					)}
-				</View>
-
-				{/* ── Card footer (old UI pattern) ── */}
-				<View style={styles.cardInfo}>
-					<Text style={styles.cardName} numberOfLines={1}>
-						{model.name}
-					</Text>
-					<Text style={styles.cardSize} numberOfLines={1}>
-						{isDownloaded ? '✓ Ready' : model.fileSize}
-					</Text>
-				</View>
-			</Animated.View>
-		</TouchableOpacity>
-	)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EMPTY STATE
-// ─────────────────────────────────────────────────────────────────────────────
-
-function EmptyStyleCatalog(): React.ReactElement {
-	return (
-		<View style={styles.emptyContainer}>
-			<Sparkles size={36} color={COLORS.textGray} />
-			<Text style={styles.emptyTitle}>No Styles Available</Text>
-			<Text style={styles.emptyBody}>
-				Visit the Styles tab to sync and download art models from the
-				catalog.
-			</Text>
-		</View>
-	)
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface RouteParams {
-	sourceUri?: string
-}
-
-interface StyleSelectionScreenProps {
-	route: { params?: RouteParams }
-	navigation: any
-}
-
-export default function StyleSelectionScreen({
-	route,
-}: StyleSelectionScreenProps): React.ReactElement {
+export default function StyleSelectionScreen(): React.ReactElement {
 	const { sourceUri } = useLocalSearchParams<{ sourceUri?: string }>()
 	const insets = useSafeAreaInsets()
 	const router = useRouter()
@@ -335,11 +86,9 @@ export default function StyleSelectionScreen({
 			)
 		)
 	)
-
 	const allActiveModels = useModelStore(
 		useShallow((state) => state.catalog.filter((m) => m.isActive))
 	)
-
 	const processingJobs = useStyleJobStore(
 		useShallow((state) =>
 			state.jobs.filter(
@@ -350,11 +99,11 @@ export default function StyleSelectionScreen({
 
 	// ── Local state ────────────────────────────────────────────────────────────
 	const [selectedStyleId, setSelectedStyleId] = useState<StyleId | null>(null)
-	const [isEnqueuing, setIsEnqueuing] = useState<boolean>(false)
+	const [isEnqueuing, setIsEnqueuing] = useState(false)
 	const [searchQuery, setSearchQuery] = useState('')
 	const [activeCategory, setActiveCategory] = useState('All')
 
-	// ── Derived: progress map ──────────────────────────────────────────────────
+	// ── Derived: inference progress per style id ───────────────────────────────
 	const progressByStyleId = useMemo<Map<StyleId, number>>(() => {
 		const map = new Map<StyleId, number>()
 		for (const job of processingJobs) {
@@ -363,144 +112,99 @@ export default function StyleSelectionScreen({
 		return map
 	}, [processingJobs])
 
-	// ── Category + search filtering ───────────────────────────────────────────
+	// ── Filtered model list ────────────────────────────────────────────────────
 	const filteredModels = useMemo(() => {
 		return allActiveModels.filter((model) => {
 			const matchesSearch = model.name
 				.toLowerCase()
 				.includes(searchQuery.toLowerCase())
-			let matchesCategory = true
-			if (activeCategory === 'Downloaded') {
-				matchesCategory = model.downloadStatus === 'downloaded'
-			}
+			const matchesCategory =
+				activeCategory !== 'Downloaded' ||
+				model.downloadStatus === 'downloaded'
 			return matchesSearch && matchesCategory
 		})
 	}, [allActiveModels, searchQuery, activeCategory])
 
-	// ── Style selection handler ────────────────────────────────────────────────
+	// ── Handlers ──────────────────────────────────────────────────────────────
+
 	const handleStylePress = useCallback(
 		(id: StyleId): void => {
 			const model = allActiveModels.find((m) => m.id === id)
-
-			if (model && model.downloadStatus !== 'downloaded') {
-				tracker.debug(
-					'User attempted interaction with un-downloaded fine-art model asset',
-					{
-						styleId: id,
-						downloadStatus: model.downloadStatus,
-					}
-				)
+			if (model?.downloadStatus !== 'downloaded') {
+				tracker.debug('Tap on non-downloaded style — ignoring', {
+					styleId: id,
+					downloadStatus: model?.downloadStatus,
+				})
 				return
 			}
-
+			// Toggle selection: tap the already-selected style to deselect
 			setSelectedStyleId((prev) => (prev === id ? null : id))
 		},
 		[allActiveModels]
 	)
 
-	// ── Enqueue and navigate ───────────────────────────────────────────────────
 	const handleApplyStyle = useCallback(async (): Promise<void> => {
-		if (!selectedStyleId || isEnqueuing || !sourceUri) {
-			return
-		}
+		if (!selectedStyleId || isEnqueuing || !sourceUri) return
 
 		setIsEnqueuing(true)
-
 		try {
-			const payload: JobPayload = {
-				sourceUri,
-				styleId: selectedStyleId,
-			}
-
+			const payload: JobPayload = { sourceUri, styleId: selectedStyleId }
 			useStyleJobStore.getState().enqueue(payload)
-
 			void StyleJobService.processNextJobInQueue()
-
-			router.navigate({
-				pathname: '/(tabs)/gallery',
-			})
+			router.navigate({ pathname: '/(tabs)/gallery' })
 		} catch (err) {
-			tracker.error(
-				'Failed to commit style job payload to processing queue',
-				{
-					styleId: selectedStyleId,
-					hasSourceUri: !!sourceUri,
-					error:
-						err instanceof Error
-							? {
-									name: err.name,
-									message: err.message,
-									stack: err.stack,
-								}
-							: String(err),
-				}
-			)
-
+			tracker.error('Failed to enqueue style job', {
+				styleId: selectedStyleId,
+				hasSourceUri: Boolean(sourceUri),
+				error:
+					err instanceof Error
+						? {
+								name: err.name,
+								message: err.message,
+								stack: err.stack,
+							}
+						: String(err),
+			})
 			Alert.alert(
 				'Queue Error',
-				'Could not enqueue this image for style transfer. Please clear cache or try again.'
+				'Could not enqueue this image for style transfer. Please try again.'
 			)
 		} finally {
 			setIsEnqueuing(false)
 		}
 	}, [selectedStyleId, isEnqueuing, sourceUri, router])
 
-	// ── FlatList renderItem ────────────────────────────────────────────────────
-	//const renderStyleCard = useCallback(
-	//	({ item }: ListRenderItemInfo<StyleModel>): React.ReactElement => {
-	//		const isSelected = item.id === selectedStyleId
-	//		const progressPercent = progressByStyleId.get(item.id) ?? null
-
-	//		return (
-	//			<StyleCard
-	//				model={item}
-	//				isSelected={isSelected}
-	//				progressPercent={progressPercent}
-	//				onPress={handleStylePress}
-	//			/>
-	//		)
-	//	},
-	//	[selectedStyleId, progressByStyleId, handleStylePress]
-	//)
-
-	//const keyExtractor = useCallback((item: StyleModel): string => item.id, [])
-
-	// ── Error fallback guard ───────────────────────────────────────────────────
+	// ── Guard: missing / invalid sourceUri ────────────────────────────────────
 	if (
 		!sourceUri ||
 		typeof sourceUri !== 'string' ||
 		sourceUri.trim() === ''
 	) {
-		tracker.warn(
-			'StyleSelectionScreen mounted with missing or invalid sourceUri parameter',
-			{
-				receivedType: typeof sourceUri,
-				catalogSize: allActiveModels.length,
-			}
-		)
+		tracker.warn('StyleSelectionScreen mounted without a valid sourceUri', {
+			receivedType: typeof sourceUri,
+			catalogSize: allActiveModels.length,
+		})
 		return (
-			<View style={styles.errorFallbackContainer}>
+			<View style={styles.errorContainer}>
 				<StatusBar style="dark" />
 				<AlertCircle size={48} color="#EF4444" strokeWidth={1.5} />
-				<Text style={styles.errorFallbackTitle}>Missing Photo</Text>
-				<Text style={styles.errorFallbackBody}>
+				<Text style={styles.errorTitle}>Missing Photo</Text>
+				<Text style={styles.errorBody}>
 					No source photo was provided. Please go back and select an
 					image first.
 				</Text>
 				<TouchableOpacity
-					style={styles.errorFallbackButton}
+					style={styles.errorButton}
 					onPress={() => router.back()}
 					activeOpacity={0.8}
 				>
-					<Text style={styles.errorFallbackButtonText}>
-						← Go Back
-					</Text>
+					<Text style={styles.errorButtonText}>← Go Back</Text>
 				</TouchableOpacity>
 			</View>
 		)
 	}
 
-	// ── Button availability ────────────────────────────────────────────────────
+	// ── Derived button state ───────────────────────────────────────────────────
 	const canApply =
 		selectedStyleId !== null &&
 		!isEnqueuing &&
@@ -508,12 +212,11 @@ export default function StyleSelectionScreen({
 
 	const selectedModel = allActiveModels.find((m) => m.id === selectedStyleId)
 
-	// ── Render ─────────────────────────────────────────────────────────────────
 	return (
 		<View style={styles.screen}>
 			<StatusBar style="dark" />
 
-			{/* ── Header ── */}
+			{/* Header */}
 			<View
 				style={[
 					styles.header,
@@ -529,14 +232,11 @@ export default function StyleSelectionScreen({
 				>
 					<ChevronLeft
 						size={22}
-						color={COLORS.textMain}
+						color={Colors.text}
 						strokeWidth={2}
 					/>
 				</TouchableOpacity>
-
 				<Text style={styles.headerTitle}>Style Explorer</Text>
-
-				{/* Spacer to balance the back button */}
 				<View style={styles.headerSpacer} />
 			</View>
 
@@ -555,58 +255,51 @@ export default function StyleSelectionScreen({
 				</Text>
 
 				{/* Source photo strip */}
-				{sourceUri ? (
-					<View style={styles.sourcePhotoStrip}>
-						<Image
-							source={{ uri: sourceUri }}
-							style={styles.sourcePhotoThumb}
-							contentFit="cover"
-							transition={200}
-							cachePolicy="memory"
-						/>
-						<View style={styles.sourcePhotoInfo}>
-							<Text style={styles.sourcePhotoLabel}>
-								Source Photo
-							</Text>
-							<Text
-								style={styles.sourcePhotoHint}
-								numberOfLines={2}
-							>
-								Select a style below to apply to this image
-							</Text>
-						</View>
+				<View style={styles.sourceStrip}>
+					<Image
+						source={{ uri: sourceUri }}
+						style={styles.sourceThumb}
+						contentFit="cover"
+						transition={200}
+						cachePolicy="memory"
+					/>
+					<View style={styles.sourceInfo}>
+						<Text style={styles.sourceLabel}>Source Photo</Text>
+						<Text style={styles.sourceHint} numberOfLines={2}>
+							Select a style below to apply to this image
+						</Text>
 					</View>
-				) : null}
+				</View>
 
-				{/* Info Box */}
+				{/* Info chips */}
 				<View style={styles.infoBox}>
-					<InfoItem
-						icon={<Sparkles size={16} color={COLORS.primary} />}
+					<CatalogInfoItem
+						icon={<Sparkles size={16} color={Colors.primary} />}
 						label="AI Curated"
 					/>
-					<InfoItem
-						icon={<Eye size={16} color={COLORS.primary} />}
+					<CatalogInfoItem
+						icon={<Eye size={16} color={Colors.primary} />}
 						label="Live Preview"
 					/>
-					<InfoItem
-						icon={<Download size={16} color={COLORS.primary} />}
+					<CatalogInfoItem
+						icon={<Download size={16} color={Colors.primary} />}
 						label="Offline Use"
 					/>
 				</View>
 
-				{/* Search Bar */}
+				{/* Search */}
 				<View style={styles.searchContainer}>
-					<Search size={20} color={COLORS.textGray} />
+					<Search size={20} color={Colors.textMuted} />
 					<TextInput
 						placeholder="Search styles..."
 						style={styles.searchInput}
 						value={searchQuery}
 						onChangeText={setSearchQuery}
-						placeholderTextColor={COLORS.textGray}
+						placeholderTextColor={Colors.textMuted}
 					/>
 				</View>
 
-				{/* Category Pills */}
+				{/* Category pills */}
 				<ScrollView
 					horizontal
 					showsHorizontalScrollIndicator={false}
@@ -634,46 +327,43 @@ export default function StyleSelectionScreen({
 					))}
 				</ScrollView>
 
-				{/* Style Grid */}
+				{/* Style grid */}
 				{filteredModels.length === 0 ? (
 					<EmptyStyleCatalog />
 				) : (
 					<View style={styles.grid}>
-						{filteredModels.map((item) => {
-							const isSelected = item.id === selectedStyleId
-							const progressPercent =
-								progressByStyleId.get(item.id) ?? null
-							return (
-								<StyleCard
-									key={item.id}
-									model={item}
-									isSelected={isSelected}
-									progressPercent={progressPercent}
-									onPress={handleStylePress}
-								/>
-							)
-						})}
+						{filteredModels.map((item) => (
+							<SelectionStyleCard
+								key={item.id}
+								model={item}
+								isSelected={item.id === selectedStyleId}
+								progressPercent={
+									progressByStyleId.get(item.id) ?? null
+								}
+								onPress={handleStylePress}
+							/>
+						))}
 					</View>
 				)}
 
-				{/* FAQ Section */}
+				{/* FAQ */}
 				<View style={styles.faqSection}>
 					<View style={styles.faqHeaderRow}>
-						<HelpCircle size={22} color={COLORS.textMain} />
+						<HelpCircle size={22} color={Colors.text} />
 						<Text style={styles.faqHeader}>Help &amp; Tips</Text>
 					</View>
-					<FaqItem
+					<CatalogFaqItem
 						question="How do I download a new style?"
 						answer="Tap on any style. If it's not in your library, the download will begin automatically."
 					/>
-					<FaqItem
+					<CatalogFaqItem
 						question="Can I combine styles?"
 						answer="Currently, ArtLens applies one primary style per image for the best resolution results."
 					/>
 				</View>
 			</ScrollView>
 
-			{/* ── Sticky action bar ── */}
+			{/* Sticky action bar */}
 			<View style={[styles.actionBar, { paddingBottom: 18 }]}>
 				{selectedModel ? (
 					<View style={styles.actionBarInfo}>
@@ -685,7 +375,7 @@ export default function StyleSelectionScreen({
 						</Text>
 						<Text style={styles.actionBarStyleHint}>
 							{(selectedModel.description?.length ?? 0) > 60
-								? selectedModel.description?.slice(0, 57) + '…'
+								? `${selectedModel.description?.slice(0, 57)}…`
 								: (selectedModel.description ??
 									'No description available')}
 						</Text>
@@ -716,7 +406,7 @@ export default function StyleSelectionScreen({
 						<>
 							<Sparkles
 								size={16}
-								color={canApply ? '#FFF' : COLORS.textGray}
+								color={canApply ? '#FFF' : Colors.textMuted}
 								strokeWidth={2}
 							/>
 							<Text
@@ -740,14 +430,10 @@ export default function StyleSelectionScreen({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-	// ── Root ──────────────────────────────────────────────────────────────────
-	screen: {
-		flex: 1,
-		backgroundColor: '#FFFFFF',
-	},
+	screen: { flex: 1, backgroundColor: '#FFFFFF' },
 
-	// ── Error fallback ─────────────────────────────────────────────────────────
-	errorFallbackContainer: {
+	// Error fallback
+	errorContainer: {
 		flex: 1,
 		backgroundColor: '#FFFFFF',
 		alignItems: 'center',
@@ -755,34 +441,34 @@ const styles = StyleSheet.create({
 		padding: 32,
 		gap: 16,
 	},
-	errorFallbackTitle: {
+	errorTitle: {
 		fontSize: 22,
 		fontWeight: '600',
-		color: COLORS.textMain,
+		color: Colors.text,
 		textAlign: 'center',
 	},
-	errorFallbackBody: {
+	errorBody: {
 		fontSize: 15,
-		color: COLORS.textGray,
+		color: Colors.textMuted,
 		textAlign: 'center',
 		lineHeight: 22,
 	},
-	errorFallbackButton: {
+	errorButton: {
 		marginTop: 8,
 		paddingVertical: 12,
 		paddingHorizontal: 24,
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 		borderRadius: 10,
 		borderWidth: 1,
-		borderColor: COLORS.border,
+		borderColor: Colors.border,
 	},
-	errorFallbackButtonText: {
+	errorButtonText: {
 		fontSize: 15,
 		fontWeight: '600',
-		color: COLORS.textMain,
+		color: Colors.text,
 	},
 
-	// ── Header ─────────────────────────────────────────────────────────────────
+	// Header
 	header: {
 		flexDirection: 'row',
 		alignItems: 'center',
@@ -791,39 +477,37 @@ const styles = StyleSheet.create({
 		paddingBottom: 12,
 		backgroundColor: '#FFFFFF',
 		borderBottomWidth: 1,
-		borderBottomColor: COLORS.border,
+		borderBottomColor: Colors.border,
 	},
 	backButton: {
 		width: 40,
 		height: 40,
 		borderRadius: 20,
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 		alignItems: 'center',
 		justifyContent: 'center',
 	},
-	headerTitle: { fontSize: 17, fontWeight: '700', color: COLORS.textMain },
+	headerTitle: { fontSize: 17, fontWeight: '700', color: Colors.text },
 	headerSpacer: { width: 40 },
 
-	// ── Scroll ─────────────────────────────────────────────────────────────────
 	scrollContent: { padding: H_PADDING },
 
-	// ── Page intro ─────────────────────────────────────────────────────────────
 	pageTitle: {
 		fontSize: 32,
 		fontWeight: '800',
-		color: COLORS.textMain,
+		color: Colors.text,
 		marginBottom: 8,
 		letterSpacing: -0.5,
 	},
 	pageSubtitle: {
 		fontSize: 16,
-		color: COLORS.textGray,
+		color: Colors.textMuted,
 		marginBottom: 20,
 		lineHeight: 22,
 	},
 
-	// ── Source photo strip ─────────────────────────────────────────────────────
-	sourcePhotoStrip: {
+	// Source photo strip
+	sourceStrip: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		backgroundColor: '#F8F3FF',
@@ -832,28 +516,24 @@ const styles = StyleSheet.create({
 		marginBottom: 20,
 		gap: 14,
 	},
-	sourcePhotoThumb: {
+	sourceThumb: {
 		width: 54,
 		height: 54,
 		borderRadius: 10,
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 	},
-	sourcePhotoInfo: { flex: 1 },
-	sourcePhotoLabel: {
+	sourceInfo: { flex: 1 },
+	sourceLabel: {
 		fontSize: 11,
 		fontWeight: '700',
-		color: COLORS.primary,
+		color: Colors.primary,
 		letterSpacing: 1,
 		textTransform: 'uppercase',
 		marginBottom: 4,
 	},
-	sourcePhotoHint: {
-		fontSize: 13,
-		color: COLORS.textGray,
-		lineHeight: 18,
-	},
+	sourceHint: { fontSize: 13, color: Colors.textMuted, lineHeight: 18 },
 
-	// ── Info Box ───────────────────────────────────────────────────────────────
+	// Info chips
 	infoBox: {
 		flexDirection: 'row',
 		backgroundColor: '#F8F3FF',
@@ -862,14 +542,12 @@ const styles = StyleSheet.create({
 		marginBottom: 24,
 		justifyContent: 'space-around',
 	},
-	infoItem: { alignItems: 'center', gap: 6 },
-	infoText: { fontSize: 11, fontWeight: '600', color: COLORS.primary },
 
-	// ── Search ─────────────────────────────────────────────────────────────────
+	// Search
 	searchContainer: {
 		flexDirection: 'row',
 		alignItems: 'center',
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 		borderRadius: 12,
 		paddingHorizontal: 12,
 		height: 48,
@@ -879,171 +557,36 @@ const styles = StyleSheet.create({
 		flex: 1,
 		fontSize: 16,
 		marginLeft: 8,
-		color: COLORS.textMain,
+		color: Colors.text,
 	},
 
-	// ── Category pills ─────────────────────────────────────────────────────────
+	// Category pills
 	categoryScroll: { marginBottom: 24 },
 	pill: {
 		paddingHorizontal: 18,
 		paddingVertical: 10,
 		borderRadius: 25,
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 		marginRight: 10,
 	},
-	activePill: { backgroundColor: COLORS.primary },
-	pillText: { fontSize: 14, color: COLORS.textGray, fontWeight: '600' },
+	activePill: { backgroundColor: Colors.primary },
+	pillText: { fontSize: 14, color: Colors.textMuted, fontWeight: '600' },
 	activePillText: { color: '#FFF' },
 
-	// ── Grid ───────────────────────────────────────────────────────────────────
+	// Grid
 	grid: {
 		flexDirection: 'row',
 		flexWrap: 'wrap',
 		justifyContent: 'space-between',
+		gap: COLUMN_GAP,
 	},
 
-	// ── Card ───────────────────────────────────────────────────────────────────
-	cardTouchable: {
-		width: CARD_WIDTH,
-		marginBottom: 20,
-	},
-	card: {
-		width: '100%',
-		backgroundColor: '#FFF',
-		borderRadius: 16,
-		overflow: 'hidden',
-		borderWidth: 1,
-		borderColor: COLORS.border,
-		...Platform.select({
-			ios: {
-				shadowColor: '#000',
-				shadowOffset: { width: 0, height: 4 },
-				shadowOpacity: 0.1,
-				shadowRadius: 8,
-			},
-			android: { elevation: 4 },
-		}),
-	},
-	cardSelected: {
-		borderColor: COLORS.primary,
-		borderWidth: 2,
-	},
-	cardDisabled: {
-		opacity: 0.55,
-	},
-	cardImageContainer: {
-		width: '100%',
-		height: CARD_WIDTH, // square thumbnail
-		backgroundColor: COLORS.border,
-		overflow: 'hidden',
-		borderTopLeftRadius: 16,
-		borderTopRightRadius: 16,
-	},
-	thumbnailSkeleton: {
-		backgroundColor: '#E5E5EA',
-	},
-	// Processing progress overlay
-	progressOverlay: {
-		...StyleSheet.absoluteFillObject,
-		backgroundColor: 'rgba(255,255,255,0.85)',
-		alignItems: 'center',
-		justifyContent: 'center',
-		gap: 8,
-		padding: 12,
-	},
-	progressInner: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		gap: 8,
-	},
-	progressSpinner: {},
-	progressText: {
-		fontSize: 20,
-		fontWeight: '800',
-		color: COLORS.primary,
-		fontVariant: ['tabular-nums'],
-	},
-	progressBarTrack: {
-		width: '80%',
-		height: 3,
-		borderRadius: 2,
-		backgroundColor: COLORS.border,
-		overflow: 'hidden',
-	},
-	progressBarFill: {
-		height: '100%',
-		borderRadius: 2,
-		backgroundColor: COLORS.primary,
-	},
-	// Download badge
-	unavailableBadge: {
-		position: 'absolute',
-		top: 8,
-		right: 8,
-		paddingVertical: 3,
-		paddingHorizontal: 7,
-		borderRadius: 6,
-		backgroundColor: 'rgba(0,0,0,0.5)',
-		alignItems: 'center',
-		justifyContent: 'center',
-	},
-	unavailableBadgeText: {
-		fontSize: 10,
-		fontWeight: '600',
-		color: '#FFF',
-		letterSpacing: 0.5,
-	},
-	// Selected badge
-	selectedBadge: {
-		position: 'absolute',
-		top: 8,
-		right: 8,
-		width: 28,
-		height: 28,
-		borderRadius: 14,
-		backgroundColor: COLORS.primary,
-		alignItems: 'center',
-		justifyContent: 'center',
-	},
-	// Card footer (old UI)
-	cardInfo: { padding: 12 },
-	cardName: {
-		fontSize: 16,
-		fontWeight: '700',
-		color: COLORS.textMain,
-	},
-	cardSize: {
-		fontSize: 12,
-		color: COLORS.textGray,
-		marginTop: 2,
-	},
-
-	// ── Empty state ────────────────────────────────────────────────────────────
-	emptyContainer: {
-		width: '100%',
-		paddingVertical: 40,
-		alignItems: 'center',
-		gap: 12,
-	},
-	emptyTitle: {
-		fontSize: 18,
-		fontWeight: '700',
-		color: COLORS.textMain,
-		textAlign: 'center',
-	},
-	emptyBody: {
-		fontSize: 14,
-		color: COLORS.textGray,
-		textAlign: 'center',
-		lineHeight: 20,
-	},
-
-	// ── FAQ ────────────────────────────────────────────────────────────────────
+	// FAQ
 	faqSection: {
 		marginTop: 20,
 		paddingTop: 30,
 		borderTopWidth: 1,
-		borderTopColor: COLORS.border,
+		borderTopColor: Colors.border,
 		marginBottom: 20,
 	},
 	faqHeaderRow: {
@@ -1052,17 +595,9 @@ const styles = StyleSheet.create({
 		gap: 8,
 		marginBottom: 20,
 	},
-	faqHeader: { fontSize: 20, fontWeight: '800', color: COLORS.textMain },
-	faqItem: { marginBottom: 24 },
-	faqQuestion: {
-		fontSize: 16,
-		fontWeight: '700',
-		color: COLORS.textMain,
-		marginBottom: 6,
-	},
-	faqAnswer: { fontSize: 14, color: COLORS.textGray, lineHeight: 20 },
+	faqHeader: { fontSize: 20, fontWeight: '800', color: Colors.text },
 
-	// ── Sticky action bar ──────────────────────────────────────────────────────
+	// Sticky action bar
 	actionBar: {
 		position: 'absolute',
 		bottom: 0,
@@ -1074,7 +609,7 @@ const styles = StyleSheet.create({
 		paddingTop: 14,
 		backgroundColor: '#FFFFFF',
 		borderTopWidth: StyleSheet.hairlineWidth,
-		borderTopColor: COLORS.border,
+		borderTopColor: Colors.border,
 		gap: 12,
 		...Platform.select({
 			ios: {
@@ -1086,31 +621,27 @@ const styles = StyleSheet.create({
 			android: { elevation: 8 },
 		}),
 	},
-	actionBarInfo: {
-		flex: 1,
-		justifyContent: 'center',
-		gap: 3,
-	},
+	actionBarInfo: { flex: 1, justifyContent: 'center', gap: 3 },
 	actionBarStyleName: {
 		fontSize: 15,
 		fontWeight: '700',
-		color: COLORS.textMain,
+		color: Colors.text,
 	},
 	actionBarStyleHint: {
 		fontSize: 11,
-		color: COLORS.textGray,
+		color: Colors.textMuted,
 		lineHeight: 15,
 	},
 	actionBarPlaceholder: {
 		fontSize: 13,
-		color: COLORS.textGray,
+		color: Colors.textMuted,
 		fontStyle: 'italic',
 	},
 	applyButton: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'center',
-		backgroundColor: COLORS.primary,
+		backgroundColor: Colors.primary,
 		borderRadius: 12,
 		paddingVertical: 13,
 		paddingHorizontal: 18,
@@ -1118,7 +649,7 @@ const styles = StyleSheet.create({
 		minWidth: 180,
 		...Platform.select({
 			ios: {
-				shadowColor: COLORS.primary,
+				shadowColor: Colors.primary,
 				shadowOffset: { width: 0, height: 4 },
 				shadowOpacity: 0.35,
 				shadowRadius: 10,
@@ -1127,7 +658,7 @@ const styles = StyleSheet.create({
 		}),
 	},
 	applyButtonDisabled: {
-		backgroundColor: COLORS.border,
+		backgroundColor: Colors.border,
 		...Platform.select({
 			ios: { shadowOpacity: 0 },
 			android: { elevation: 0 },
@@ -1139,7 +670,5 @@ const styles = StyleSheet.create({
 		color: '#FFF',
 		letterSpacing: 0.3,
 	},
-	applyButtonTextDisabled: {
-		color: COLORS.textGray,
-	},
+	applyButtonTextDisabled: { color: Colors.textMuted },
 })

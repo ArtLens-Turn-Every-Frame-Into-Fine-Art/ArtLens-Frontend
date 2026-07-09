@@ -28,7 +28,7 @@ export type DownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded'
  * When a download fails, the registry stores `'failed'` but the store is
  * reset to `'not_downloaded'` so UI components only see the public union.
  */
-export type RegistryDownloadStatus = DownloadStatus | 'failed'
+type RegistryDownloadStatus = DownloadStatus | 'failed'
 
 /** Supported colour processing modes for the style transfer pipeline. */
 export type ColourMode = 'texture_only' | 'full_colour' | 'luminance_blend'
@@ -209,12 +209,6 @@ export interface BatteryState {
 	batteryLevel: number // [0, 100] percentage
 	isPowerSaverActive: boolean
 	isProcessingFrozen: boolean
-}
-
-/** Populated by useIncomingImage when the app is opened via share or deep link. */
-export interface IncomingImageState {
-	uri: string | null
-	filename: string | null
 }
 
 /** User-selected format for saved artwork files. Stored in useModelStore. */
